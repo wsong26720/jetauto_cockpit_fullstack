@@ -59,12 +59,12 @@
         try { this.accept(JSON.parse(e.data)); }
         catch (err) { this.issue=err.message; this.notify(this.status()); }
       };
-      ws.onerror=() => { if (epoch===this.epoch) { this.issue='地图连接失败，请确认后端已更新到 v1.6'; this.notify(this.status()); } };
+      ws.onerror=() => { if (epoch===this.epoch) { this.issue='地图连接失败，请确认完整后端已更新并重启网关'; this.notify(this.status()); } };
       ws.onclose=() => {
         if (epoch!==this.epoch) return;
         this.connected=false; this.pose=null; this.scan=null;
         this.issue=this.lastMessage ? '地图连接断开，正在重连；底图为最后收到的数据' :
-          '地图服务未连接，请确认已更新 v1.6 后端并重启网关';
+          '地图服务未连接，请确认完整后端已更新并重启网关';
         this.notify(this.status());
         this.retry=setTimeout(()=>this.connect(),3000);
       };

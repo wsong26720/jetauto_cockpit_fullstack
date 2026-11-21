@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Hiwonder JetAuto Pro 数字驾驶舱 | ROS 2 Humble Web Cockpit</title>
+  <title>Hiwonder JetAuto Pro 数字驾驶舱 1.0 | ROS 2 Humble Web Cockpit</title>
   <script src="https://cdn.tailwindcss.com/3.4.17"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -70,7 +70,7 @@
         </div>
         <div>
           <div class="flex items-center gap-2">
-            <h1 class="text-sm sm:text-base font-bold tracking-tight text-slate-900">JetAuto Pro 数字驾驶舱</h1>
+            <h1 class="text-sm sm:text-base font-bold tracking-tight text-slate-900">JetAuto Pro 数字驾驶舱 1.0</h1>
             <span class="px-2 py-0.5 text-[11px] font-medium rounded-full bg-blue-50 text-blue-700 border border-blue-200 font-mono-code">ROS 2 Humble</span>
             <span class="hidden md:inline-flex px-2 py-0.5 text-[11px] font-medium rounded-full bg-slate-100 text-slate-700 border border-slate-200 font-mono-code">Jetson Orin NX Super</span>
           </div>
@@ -838,8 +838,8 @@
   <div id="toastContainer" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm pointer-events-none"></div>
 
   <!-- ==================== 核心交互与 ROS 2 协议栈逻辑 ==================== -->
-  <script src="cockpit_transport.js?v=1.8.0"></script>
-  <script src="live_map.js?v=1.8.0"></script>
+  <script src="cockpit_transport.js?v=1.0.0"></script>
+  <script src="live_map.js?v=1.0.0"></script>
   <script>
     (function () {
       'use strict';
@@ -1223,7 +1223,7 @@
       function applyNavigation(data) {
         state.navigationAvailable=!!data.capabilities?.navigation;
         const n=data.nav_state || {};
-        state.localization=n.localization || {state:'UNAVAILABLE',message:'网关未提供自动定位，请更新到 v1.8'};
+        state.localization=n.localization || {state:'UNAVAILABLE',message:'网关未提供自动定位，请更新完整后端并重启网关'};
         setText('autoLocalizationStatus','自动定位：'+state.localization.message+
           (state.localization.state==='ROTATING'?'；已转 '+state.localization.rotation_degrees+'°':'')+
           (state.localization.match?'；匹配 '+Math.round(state.localization.match.hit_ratio*100)+'%，候选差 '+state.localization.match.margin.toFixed(3):''));

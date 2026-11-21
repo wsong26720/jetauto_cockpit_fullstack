@@ -45,7 +45,7 @@ except ImportError:
 
 app = FastAPI(
     title="JetAuto Pro ROS 2 Humble Cockpit Gateway",
-    version="1.8.0",
+    version="1.0.0",
     description="车端网关服务：硬件遥测、手动/导航速度仲裁、初始定位、Nav2 任务与 Launch 管理",
 )
 
