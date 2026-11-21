@@ -118,7 +118,7 @@ python3 -m pip install -r backend/requirements.txt
 2. 备份 `/home/ubuntu/jetauto_cockpit`。将本项目完整的 `frontend/`、`backend/` 和 `README.md` 复制到车端对应位置；包括两个 JS、所有 Python、Shell 和 `config/`。保留自己的 `waypoints_store.json` 和配置。
 3. 无需覆盖厂商 `~/ros2_ws`、地图或重新编译厂商包。启动新网关，浏览器 Ctrl+F5 强制刷新。不要同时运行两个网关。
 
-历史文档清理和 1.0.0 版本归档在本地项目完成；车端正在运行的进程版本以 `/openapi.json` 为准。版本归档本身不重启机器人服务。
+发布包的代码与文档需同步到车端；正在运行的网关版本以 `/openapi.json` 为准。替换后端文件后，需要重新启动网关才能加载新版本。
 
 ### 启动服务
 
