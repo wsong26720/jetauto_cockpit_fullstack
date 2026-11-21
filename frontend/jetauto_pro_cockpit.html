@@ -1,0 +1,3010 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hiwonder JetAuto Pro 数字驾驶舱 | ROS 2 Humble Web Cockpit</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    .hidden { display: none !important; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    /* Canvas dimensions must not depend on its own rendered height, even offline. */
+    #mapViewport { position: relative; width: 100%; height: 390px; overflow: hidden; }
+    @media (min-width: 640px) { #mapViewport { height: 430px; } }
+    #mapCanvas2D, #mapContainer3D { position: absolute; inset: 0; width: 100%; height: 100%; }
+    :root {
+      --bg-page: #F8FAFC;
+      --bg-card: #FFFFFF;
+      --border-soft: #E2E8F0;
+      --text-main: #0F172A;
+      --text-muted: #64748B;
+      --accent-blue: #2563EB;
+      --danger-red: #DC2626;
+      --ok-green: #10B981;
+      --warn-amber: #F59E0B;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg-page);
+      color: var(--text-main);
+      overflow-x: hidden;
+    }
+    .font-mono-code {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .cockpit-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-soft);
+      border-radius: 0.75rem;
+      box-shadow: 0 1px 2px 0 rgba(15, 23, 42, 0.03);
+    }
+    .estop-pulse {
+      animation: estopGlow 1.6s infinite;
+    }
+    @keyframes estopGlow {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.45); }
+      50% { box-shadow: 0 0 0 8px rgba(220, 38, 38, 0); }
+    }
+    /* Custom thin scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #F1F5F9; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col bg-slate-50 text-slate-900 select-none">
+
+  <!-- ==================== 顶部全局导航与急停状态栏 ==================== -->
+  <header class="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-slate-200 px-3 sm:px-5 py-2.5">
+    <div class="max-w-[1920px] mx-auto flex flex-wrap items-center justify-between gap-2.5">
+      <!-- 左侧品牌与车型标识 -->
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold text-sm shadow-sm">
+          JA
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="text-sm sm:text-base font-bold tracking-tight text-slate-900">JetAuto Pro 数字驾驶舱</h1>
+            <span class="px-2 py-0.5 text-[11px] font-medium rounded-full bg-blue-50 text-blue-700 border border-blue-200 font-mono-code">ROS 2 Humble</span>
+            <span class="hidden md:inline-flex px-2 py-0.5 text-[11px] font-medium rounded-full bg-slate-100 text-slate-700 border border-slate-200 font-mono-code">Jetson Orin NX Super</span>
+          </div>
+          <p class="text-[11px] text-slate-500 font-mono-code">
+            MACHINE_TYPE=JetAutoPro · LIDAR=YDLIDAR G4 · CAM=Astra Pro Plus · VEL=/cmd_vel
+          </p>
+        </div>
+      </div>
+
+      <!-- 中部设备连接配置与模式切换 -->
+      <div class="flex flex-wrap items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
+        <!-- 模式切换：演练仿真 vs 实车直连 -->
+        <div class="flex items-center rounded-md bg-white border border-slate-200 p-0.5">
+          <button id="btnModeSim" type="button" class="px-2.5 py-1 text-xs font-medium rounded transition-colors bg-blue-600 text-white">
+            演示模式（模拟数据）
+          </button>
+          <button id="btnModeLive" type="button" class="px-2.5 py-1 text-xs font-medium rounded transition-colors text-slate-600 hover:text-slate-900">
+            实车直连 (LAN)
+          </button>
+        </div>
+
+        <div class="h-4 w-px bg-slate-200 hidden sm:block"></div>
+
+        <!-- 机器人 IP 输入 -->
+        <div class="flex items-center gap-1.5">
+          <span id="connStatusDot" class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+          <label for="inputRobotIp" class="text-xs text-slate-500 font-medium">IP:</label>
+          <input id="inputRobotIp" type="text" value="192.168.3.73"
+            class="w-28 sm:w-32 px-2 py-1 text-xs font-mono-code bg-white border border-slate-200 rounded focus:outline-none focus:border-blue-500 text-slate-800" />
+          <button id="btnConnectConfig" type="button"
+            class="px-2 py-1 text-xs font-medium bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded transition-colors"
+            title="配置端口与重连">
+            端口/重连
+          </button>
+        </div>
+
+        <!-- 链路时效摘要 -->
+        <div class="hidden xl:flex items-center gap-2 text-[11px] font-mono-code text-slate-500 pl-1">
+          <span id="badgeRosbridge" class="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">WS:9090 未连接</span>
+          <span id="badgeVideoServer" class="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">CAM:8080 待连接</span>
+          <span id="badgeAgentServer" class="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">API:8000 未连接</span>
+        </div>
+      </div>
+
+      <!-- 右侧：软急停 (Soft E-Stop) 与解除按钮 -->
+      <div class="flex items-center gap-2">
+        <div id="estopStatusBanner" class="hidden items-center gap-1.5 px-2.5 py-1 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs font-semibold">
+          <span class="w-2 h-2 rounded-full bg-red-600 animate-ping"></span>
+          <span>手动与导航控制已锁定</span>
+        </div>
+
+        <button id="btnSoftEstop" type="button"
+          class="estop-pulse flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 active:bg-red-800 text-white font-bold text-xs sm:text-sm tracking-wide shadow-sm transition-all cursor-pointer">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+          </svg>
+          <span>软急停 E-STOP (Space)</span>
+        </button>
+
+        <button id="btnReleaseEstop" type="button"
+          class="hidden items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs sm:text-sm shadow-sm transition-all cursor-pointer">
+          <span>解除急停锁</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ==================== 主工作区网格 (三栏响应式驾驶舱布局) ==================== -->
+  <main class="flex-1 max-w-[1920px] w-full mx-auto p-3 sm:p-4 grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-start">
+
+    <!-- ==================== 左栏 (3列)：Jetson 硬件状态看板 + 单路相机视频流 ==================== -->
+    <section class="lg:col-span-3 flex flex-col gap-3.5">
+
+      <!-- 1. Jetson Orin NX Super 硬件状态看板 -->
+      <div class="cockpit-card p-3.5">
+        <div class="flex items-center justify-between pb-2.5 mb-3 border-b border-slate-100">
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-4 rounded-sm bg-blue-600"></span>
+            <h2 class="text-sm font-bold text-slate-800">Jetson 硬件状态看板</h2>
+          </div>
+          <span id="hwPowerModeBadge" class="px-2 py-0.5 text-[11px] font-mono-code font-medium bg-slate-100 text-slate-700 rounded border border-slate-200">
+            MAXN · 25W
+          </span>
+        </div>
+
+        <!-- 电池电压与采样时效卡片 (/ros_robot_controller/battery) -->
+        <div class="p-2.5 rounded-lg bg-slate-50 border border-slate-200 mb-3">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-xs font-medium text-slate-600">动力电池电压 <code class="text-[10px] text-slate-400">/battery</code></span>
+            <div class="flex items-center gap-1.5">
+              <button id="btnToggleBatterySim" type="button"
+                class="text-[10px] px-1.5 py-0.5 rounded bg-white border border-slate-200 text-slate-600 hover:bg-slate-100"
+                title="切换实测有/无样本状态">
+                切换无样本核验态
+              </button>
+              <span id="batteryStatusBadge" class="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                等待电池样本
+              </span>
+            </div>
+          </div>
+          <div class="flex items-baseline justify-between">
+            <div>
+              <span id="valBatteryVolt" class="text-xl font-bold font-mono-code text-slate-900">--</span>
+              <span id="valBatteryMv" class="text-[11px] font-mono-code text-slate-500 ml-1">--</span>
+            </div>
+            <span id="valBatteryAge" class="text-[11px] font-mono-code text-slate-400">--</span>
+          </div>
+          <div class="mt-2 w-full bg-slate-200 h-1.5 rounded-full overflow-hidden">
+            <div id="barBatteryVolt" class="bg-emerald-500 h-full transition-all duration-300" style="width: 82%"></div>
+          </div>
+          <div class="mt-1.5 flex items-center justify-between text-[10px] text-slate-400 font-mono-code">
+            <span>告警阈值: <input id="inputLowVoltWarn" type="number" step="0.1" min="9.0" max="12.5" value="10.6" class="w-12 px-1 py-0.2 bg-white border border-slate-200 rounded text-slate-700" /> V</span>
+            <span>换算: V = UInt16 / 1000</span>
+          </div>
+        </div>
+
+        <!-- CPU / GPU / RAM / Disk 指标矩阵 -->
+        <div class="grid grid-cols-2 gap-2.5 mb-3">
+          <div class="p-2.5 rounded-lg border border-slate-200 bg-white">
+            <div class="flex items-center justify-between text-xs text-slate-500 mb-1">
+              <span>CPU (8-Core)</span>
+              <span id="valCpuTemp" class="font-mono-code text-[11px] text-slate-600">--</span>
+            </div>
+            <div class="flex items-baseline justify-between mb-1.5">
+              <span id="valCpuUsage" class="text-base font-bold font-mono-code text-slate-900">--</span>
+              <span class="text-[10px] text-slate-400 font-mono-code">Orin NX</span>
+            </div>
+            <div class="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+              <div id="barCpuUsage" class="bg-blue-600 h-full transition-all duration-300" style="width: 25%"></div>
+            </div>
+          </div>
+
+          <div class="p-2.5 rounded-lg border border-slate-200 bg-white">
+            <div class="flex items-center justify-between text-xs text-slate-500 mb-1">
+              <span>GPU (Ampere)</span>
+              <span id="valGpuTemp" class="font-mono-code text-[11px] text-slate-600">--</span>
+            </div>
+            <div class="flex items-baseline justify-between mb-1.5">
+              <span id="valGpuUsage" class="text-base font-bold font-mono-code text-slate-900">--</span>
+              <span class="text-[10px] text-slate-400 font-mono-code">918 MHz</span>
+            </div>
+            <div class="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+              <div id="barGpuUsage" class="bg-indigo-600 h-full transition-all duration-300" style="width: 18%"></div>
+            </div>
+          </div>
+
+          <div class="p-2.5 rounded-lg border border-slate-200 bg-white">
+            <div class="flex items-center justify-between text-xs text-slate-500 mb-1">
+              <span>内存 RAM</span>
+              <span id="valRamDetail" class="font-mono-code text-[10px] text-slate-500">--</span>
+            </div>
+            <div class="flex items-baseline justify-between mb-1.5">
+              <span id="valRamUsage" class="text-base font-bold font-mono-code text-slate-900">--</span>
+              <span class="text-[10px] text-slate-400 font-mono-code">Swap 4%</span>
+            </div>
+            <div class="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+              <div id="barRamUsage" class="bg-emerald-600 h-full transition-all duration-300" style="width: 39%"></div>
+            </div>
+          </div>
+
+          <div class="p-2.5 rounded-lg border border-slate-200 bg-white">
+            <div class="flex items-center justify-between text-xs text-slate-500 mb-1">
+              <span>NVMe 存储</span>
+              <span id="valDiskDetail" class="font-mono-code text-[10px] text-slate-500">--</span>
+            </div>
+            <div class="flex items-baseline justify-between mb-1.5">
+              <span id="valDiskUsage" class="text-base font-bold font-mono-code text-slate-900">--</span>
+              <span class="text-[10px] text-slate-400 font-mono-code">L4T 36.4.3</span>
+            </div>
+            <div class="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+              <div id="barDiskUsage" class="bg-slate-600 h-full transition-all duration-300" style="width: 36%"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 传感器与消息新鲜度监控 -->
+        <div class="pt-2 border-t border-slate-100">
+          <div class="flex items-center justify-between text-[11px] text-slate-500 mb-1.5">
+            <span class="font-semibold text-slate-700">关键 ROS 2 话题时效监控</span>
+            <span id="valSystemClock" class="font-mono-code text-[10px]">--:--:--</span>
+          </div>
+          <div class="grid grid-cols-2 gap-1.5 text-[11px] font-mono-code">
+            <div class="flex items-center justify-between px-2 py-1 rounded bg-slate-50 border border-slate-100">
+              <span class="text-slate-600">/scan (G4)</span>
+              <span id="hzScan" class="text-emerald-600 font-medium">12.0 Hz</span>
+            </div>
+            <div class="flex items-center justify-between px-2 py-1 rounded bg-slate-50 border border-slate-100">
+              <span class="text-slate-600">/odom (EKF)</span>
+              <span id="hzOdom" class="text-emerald-600 font-medium">20.0 Hz</span>
+            </div>
+            <div class="flex items-center justify-between px-2 py-1 rounded bg-slate-50 border border-slate-100">
+              <span class="text-slate-600">/depth_cam/rgb</span>
+              <span id="hzCam" class="text-emerald-600 font-medium">30.0 fps</span>
+            </div>
+            <div class="flex items-center justify-between px-2 py-1 rounded bg-slate-50 border border-slate-100">
+              <span class="text-slate-600">/tf_static</span>
+              <span id="hzTf" class="text-emerald-600 font-medium">已锁存</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. 单路相机视频流看板 (Orbbec Astra Pro Plus) -->
+      <div class="cockpit-card p-3.5">
+        <div class="flex items-center justify-between pb-2.5 mb-2.5 border-b border-slate-100">
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-4 rounded-sm bg-blue-600"></span>
+            <h2 class="text-sm font-bold text-slate-800">单路相机视频流</h2>
+          </div>
+          <span id="badgeLdpStatus" class="px-2 py-0.5 text-[10px] font-mono-code bg-emerald-50 text-emerald-700 rounded border border-emerald-200" title="只读查询 /depth_cam/get_ldp_status">
+            LDP 未查询
+          </span>
+        </div>
+
+        <!-- 话题下拉选择器（默认锁定 Astra Pro Plus RGB，保留深度伪彩与目标跟踪入口） -->
+        <div class="mb-2.5">
+          <label for="selectCameraTopic" class="block text-[11px] font-medium text-slate-500 mb-1">
+            视频源话题切换 (`web_video_server :8080`)
+          </label>
+          <select id="selectCameraTopic"
+            class="w-full px-2.5 py-1.5 text-xs font-mono-code bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-blue-500">
+            <option value="/depth_cam/rgb/image_raw" selected>[默认] /depth_cam/rgb/image_raw (Astra RGB 彩色)</option>
+            <option value="/depth_cam/depth/image_raw" disabled>/depth_cam/depth/image_raw (需先转换；当前不可直看)</option>
+            <option value="/object_tracking/image_result">/object_tracking/image_result (目标跟踪结果图)</option>
+          </select>
+        </div>
+
+        <!-- 视频画面容器 -->
+        <div class="relative w-full aspect-[4/3] rounded-lg overflow-hidden bg-slate-900 border border-slate-200">
+          <!-- 实车 MJPEG <img> 标签 -->
+          <img id="liveCameraImg" alt="ROS 2 Camera Stream" class="hidden w-full h-full object-cover" />
+          <!-- 仿真 / 回退合成渲染画布 -->
+          <canvas id="cameraCanvas" width="640" height="480" class="w-full h-full block"></canvas>
+
+          <!-- 顶部 HUD 叠加层 -->
+          <div class="absolute top-2 left-2 right-2 flex items-center justify-between pointer-events-none">
+            <span id="camTopicOverlay" class="px-2 py-0.5 rounded bg-slate-900/75 text-white text-[10px] font-mono-code backdrop-blur-sm">
+              /depth_cam/rgb/image_raw · 640×480
+            </span>
+            <span id="camStreamStateOverlay" class="px-2 py-0.5 rounded bg-emerald-600/85 text-white text-[10px] font-mono-code">
+              LIVE 30 FPS
+            </span>
+          </div>
+        </div>
+
+        <!-- 视频底部操作条 -->
+        <div class="mt-2.5 flex items-center justify-between gap-2">
+          <div class="flex items-center gap-1.5">
+            <button id="btnToggleCrosshair" type="button"
+              class="px-2.5 py-1 text-xs font-medium rounded bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors">
+              十字准星: 开
+            </button>
+            <button id="btnReloadStream" type="button"
+              class="px-2.5 py-1 text-xs font-medium rounded bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors">
+              刷新流
+            </button>
+          </div>
+          <button id="btnSnapshotCam" type="button"
+            class="px-2.5 py-1 text-xs font-medium rounded bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 transition-colors">
+            抓拍快照 (.png)
+          </button>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ==================== 中栏 (5列)：2D/3D 地图可视化 + ROS 2 Launch 在线启停管理 ==================== -->
+    <section class="lg:col-span-5 flex flex-col gap-3.5">
+
+      <!-- 3. 2D / 3D 地图可视化引擎 -->
+      <div class="cockpit-card p-3.5 flex flex-col">
+        <!-- 顶部工具栏：2D/3D 切换与交互工具模式 -->
+        <div class="flex flex-wrap items-center justify-between gap-2 pb-2.5 mb-2.5 border-b border-slate-100">
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-4 rounded-sm bg-blue-600"></span>
+            <h2 class="text-sm font-bold text-slate-800">2D / 3D 导航地图与激光态势</h2>
+          </div>
+
+          <!-- 2D / 3D 视图切换 -->
+          <div class="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+            <button id="btnView2D" type="button"
+              class="px-2.5 py-1 text-xs font-semibold rounded-md bg-white text-blue-600 shadow-sm transition-all">
+              2D 栅格俯视
+            </button>
+            <button id="btnView3D" type="button"
+              class="px-2.5 py-1 text-xs font-semibold rounded-md text-slate-600 hover:text-slate-900 transition-all">
+              3D 空间态势
+            </button>
+          </div>
+        </div>
+
+        <!-- 地图鼠标交互模式栏 -->
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+          <div class="flex flex-wrap items-center gap-1.5">
+            <button id="btnToolPan" data-tool="pan" type="button"
+              class="map-tool-btn px-2.5 py-1 text-xs font-medium rounded-md bg-blue-600 text-white transition-colors">
+              漫游缩放
+            </button>
+            <button id="btnToolInitPose" data-tool="initialpose" type="button"
+              class="map-tool-btn px-2.5 py-1 text-xs font-medium rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors"
+              title="拖拽发布 /initialpose (6×6协方差)">
+              标定初始位姿 (/initialpose)
+            </button>
+            <button id="btnToolGoalPose" data-tool="goalpose" type="button"
+              class="map-tool-btn px-2.5 py-1 text-xs font-medium rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors"
+              title="在地图上拖拽立即执行单点导航">
+              指哪走哪 (/navigate_to_pose)
+            </button>
+            <button id="btnToolPickWaypoint" data-tool="pickwp" type="button"
+              class="map-tool-btn px-2.5 py-1 text-xs font-medium rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors"
+              title="在地图上点击并拖拽朝向以新增站点">
+              + 地图拾取站点
+            </button>
+          </div>
+
+          <button id="btnFitMap" type="button" class="px-2 py-1 text-xs font-medium rounded bg-white border border-slate-200">适应地图</button>
+          <button id="btnResetMapView" type="button"
+            class="px-2 py-1 text-xs font-medium rounded bg-white border border-slate-200 hover:bg-slate-50 text-slate-600">
+            居中车体
+          </button>
+        </div>
+
+        <div id="mappingStatusBar" role="status" style="display:flex;flex-wrap:wrap;gap:8px;margin:8px 0;font-size:12px">
+          <span id="liveMapStatus">等待地图连接</span>
+          <span id="liveTfStatus">机器人 TF：等待 · 激光 TF：等待</span>
+        </div>
+        <!-- 画布视口容器 (2D Canvas + 3D Three.js 容器) -->
+        <div id="mapViewport" class="relative w-full h-[390px] sm:h-[430px] rounded-xl overflow-hidden border border-slate-200 bg-slate-100">
+          <canvas id="mapCanvas2D" class="w-full h-full block cursor-grab active:cursor-grabbing"></canvas>
+          <div id="mapContainer3D" class="hidden w-full h-full"></div>
+
+          <!-- 左上角 TF 与实时地图位姿浮层 -->
+          <div class="absolute top-2.5 left-2.5 bg-white/90 backdrop-blur-sm border border-slate-200 rounded-lg px-2.5 py-1.5 text-[11px] font-mono-code text-slate-700 shadow-sm pointer-events-none">
+            <div class="flex items-center gap-2">
+              <span id="mapFrameLabel" class="font-semibold text-blue-700">坐标系：等待 map</span>
+            </div>
+            <div class="mt-0.5 flex items-center gap-3 text-slate-600">
+              <span>X: <strong id="hudPoseX" class="text-slate-900">0.00</strong> m</span>
+              <span>Y: <strong id="hudPoseY" class="text-slate-900">0.00</strong> m</span>
+              <span>Yaw: <strong id="hudPoseYaw" class="text-slate-900">0.0°</strong></span>
+            </div>
+          </div>
+
+          <!-- 右下角操作提示浮层 -->
+          <div id="mapToolHint" class="absolute bottom-2.5 right-2.5 bg-slate-900/80 text-white text-[11px] px-2.5 py-1 rounded-md pointer-events-none">
+            当前工具：左键拖拽平移地图，滚轮缩放视图
+          </div>
+        </div>
+
+        <!-- 图层显隐开关条 -->
+        <div class="mt-2.5 pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div class="flex flex-wrap items-center gap-3">
+            <label class="inline-flex items-center gap-1.5 cursor-pointer text-slate-700">
+              <input id="chkLayerMap" type="checkbox" checked class="rounded text-blue-600 focus:ring-0" />
+              <span>占据栅格 /map</span>
+            </label>
+            <label class="inline-flex items-center gap-1.5 cursor-pointer text-slate-700">
+              <input id="chkLayerScan" type="checkbox" checked class="rounded text-blue-600 focus:ring-0" />
+              <span>G4 雷达点云 (<code class="text-[10px]">/scan</code>)</span>
+            </label>
+            <label class="inline-flex items-center gap-1.5 cursor-pointer text-slate-700">
+              <input id="chkLayerCostmap" type="checkbox" checked class="rounded text-blue-600 focus:ring-0" />
+              <span>局部代价地图 (<code class="text-[10px]">/local_costmap</code>)</span>
+            </label>
+            <label class="inline-flex items-center gap-1.5 cursor-pointer text-slate-700">
+              <input id="chkLayerPlan" type="checkbox" checked class="rounded text-blue-600 focus:ring-0" />
+              <span>全局路径 (<code class="text-[10px]">/plan</code>)</span>
+            </label>
+            <label class="inline-flex items-center gap-1.5 cursor-pointer text-slate-700">
+              <input id="chkLayerWaypoints" type="checkbox" checked class="rounded text-blue-600 focus:ring-0" />
+              <span>编排站点标记</span>
+            </label>
+          </div>
+          <span id="mapResolution" class="text-[11px] font-mono-code text-slate-400">分辨率：等待地图</span>
+        </div>
+      </div>
+
+      <!-- 4. ROS 2 节点 / Launch 在线启停管理与地图保存 -->
+      <div class="cockpit-card p-3.5">
+        <div class="flex flex-wrap items-center justify-between gap-2 pb-2.5 mb-3 border-b border-slate-100">
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-4 rounded-sm bg-blue-600"></span>
+            <h2 class="text-sm font-bold text-slate-800">ROS 2 节点 / Launch 在线启停管理</h2>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-[11px] text-slate-500">独立进程组管理 · 含建图/导航互斥锁</span>
+            <button id="btnInspectNodes" type="button"
+              class="px-2 py-1 text-[11px] font-medium rounded bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors">
+              查看在线节点拓扑
+            </button>
+          </div>
+        </div>
+
+        <!-- 自定义地图加载与 map_saver_cli 地图保存工具栏 -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-2.5 p-2.5 rounded-lg bg-slate-50 border border-slate-200 mb-3">
+          <div>
+            <label for="inputNavMapPath" class="block text-[11px] font-medium text-slate-600 mb-1">
+              已保存地图名称（例如 map_501，不填路径或扩展名）
+            </label>
+            <input id="inputNavMapPath" type="text" value="map_501" list="savedMapNames"
+              class="w-full px-2 py-1 text-xs font-mono-code bg-white border border-slate-200 rounded text-slate-800 focus:outline-none focus:border-blue-500" />
+            <datalist id="savedMapNames"></datalist>
+            <div class="mt-2 flex flex-wrap gap-2">
+              <button id="btnLoadSavedMap" type="button" disabled class="px-2.5 py-1 text-xs font-semibold rounded bg-blue-600 text-white">加载地图（仅显示）</button>
+              <button id="btnUnloadSavedMap" type="button" disabled class="px-2.5 py-1 text-xs rounded border border-slate-300">停止保存地图服务</button>
+              <button id="btnRefreshSavedMaps" type="button" class="px-2 py-1 text-xs rounded border border-slate-300">刷新列表</button>
+            </div>
+            <div id="savedMapStatus" role="status" class="mt-1 text-xs text-slate-500">等待网关读取地图列表</div>
+            <div class="mt-1 text-[11px] text-slate-500">加载只显示地图，不自动定位或导航；先停止 SLAM 等其他地图发布源。</div>
+          </div>
+          <div>
+            <label for="inputSaveMapPath" class="block text-[11px] font-medium text-slate-600 mb-1">
+              保存当前建图 (`map_saver_cli -f` 自定义输出路径)
+            </label>
+            <div class="flex items-center gap-1.5">
+              <input id="inputSaveMapPath" type="text" value="/home/ubuntu/ros2_ws/src/slam/maps/custom_map_01"
+                class="flex-1 px-2 py-1 text-xs font-mono-code bg-white border border-slate-200 rounded text-slate-800 focus:outline-none focus:border-blue-500" />
+              <button id="btnSaveMapCli" type="button"
+                class="px-2.5 py-1 text-xs font-semibold rounded bg-blue-600 hover:bg-blue-700 text-white whitespace-nowrap transition-colors">
+                保存地图
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 6 大核心模块启停网格 -->
+        <div id="launchModulesGrid" class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          <!-- JS 动态渲染 6 个独立 Launch 卡片 -->
+        </div>
+
+        <!-- 终端日志抽屉 -->
+        <div class="mt-3 pt-2.5 border-t border-slate-100">
+          <div class="flex items-center justify-between mb-1.5">
+            <span class="text-xs font-semibold text-slate-700">Launch 进程标准输出与系统事件日志</span>
+            <button id="btnClearLogs" type="button" class="text-[11px] text-slate-400 hover:text-slate-600">清空日志</button>
+          </div>
+          <div id="launchLogConsole" class="h-28 overflow-y-auto rounded-lg bg-slate-900 text-slate-200 p-2.5 font-mono-code text-[11px] leading-relaxed">
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ==================== 右栏 (4列)：麦轮虚拟摇杆 (/cmd_vel) + Nav2 站点导航任务编排 ==================== -->
+    <section class="lg:col-span-4 flex flex-col gap-3.5">
+
+      <!-- 5. 麦轮虚拟摇杆控制面板 (严格统一发布 /cmd_vel) -->
+      <div class="cockpit-card p-3.5">
+        <div class="flex items-center justify-between pb-2.5 mb-3 border-b border-slate-100">
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-4 rounded-sm bg-blue-600"></span>
+            <h2 class="text-sm font-bold text-slate-800">麦轮全向摇杆控制</h2>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="px-2 py-0.5 text-[11px] font-mono-code bg-blue-50 text-blue-700 rounded border border-blue-200">
+              Topic: /cmd_vel
+            </span>
+            <span id="badgeWatchdog" class="px-1.5 py-0.5 text-[10px] font-mono-code bg-emerald-50 text-emerald-700 rounded border border-emerald-200">
+              500ms看门狗
+            </span>
+          </div>
+        </div>
+
+        <div id="controlIssues" role="status" class="mb-3 p-2 rounded bg-amber-50 text-amber-800 text-xs">正在检查底盘、ROS 与急停状态…</div>
+        <div class="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+          <!-- 左侧全向虚拟摇杆圆盘 (7列) -->
+          <div class="sm:col-span-7 flex flex-col items-center">
+            <div id="joystickPad"
+              class="relative w-44 h-44 rounded-full bg-slate-50 border-2 border-slate-200 shadow-inner flex items-center justify-center touch-none cursor-pointer">
+              <!-- 十字刻度线 -->
+              <div class="absolute inset-4 rounded-full border border-dashed border-slate-200 pointer-events-none"></div>
+              <div class="absolute w-full h-px bg-slate-200 pointer-events-none"></div>
+              <div class="absolute h-full w-px bg-slate-200 pointer-events-none"></div>
+              <span class="absolute top-1.5 text-[10px] font-mono-code text-slate-400 pointer-events-none">+X 前进</span>
+              <span class="absolute bottom-1.5 text-[10px] font-mono-code text-slate-400 pointer-events-none">-X 后退</span>
+              <span class="absolute left-1.5 text-[10px] font-mono-code text-slate-400 pointer-events-none">+Y左移</span>
+              <span class="absolute right-1.5 text-[10px] font-mono-code text-slate-400 pointer-events-none">-Y右移</span>
+
+              <!-- 摇杆拇指球 -->
+              <div id="joystickKnob"
+                class="w-14 h-14 rounded-full bg-blue-600 text-white shadow-md flex items-center justify-center font-mono-code text-[10px] font-bold transition-transform duration-75 pointer-events-none">
+                IDLE
+              </div>
+            </div>
+
+            <!-- 自转角速度 Angular.Z 控制条 -->
+            <div class="w-full mt-3 px-1">
+              <div class="flex items-center justify-between text-xs text-slate-600 mb-1">
+                <button id="btnYawLeft" type="button"
+                  class="px-2.5 py-1 rounded bg-slate-100 hover:bg-blue-50 hover:text-blue-700 font-mono-code text-xs font-semibold active:bg-blue-100">
+                  ↺ 左旋 (+Z)
+                </button>
+                <span class="text-[11px] font-mono-code text-slate-500">自转角速度 `angular.z`</span>
+                <button id="btnYawRight" type="button"
+                  class="px-2.5 py-1 rounded bg-slate-100 hover:bg-blue-50 hover:text-blue-700 font-mono-code text-xs font-semibold active:bg-blue-100">
+                  右旋 (-Z) ↻
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 右侧实时速度矢量与档位限制 (5列) -->
+          <div class="sm:col-span-5 flex flex-col gap-2">
+            <div class="p-2.5 rounded-lg bg-slate-50 border border-slate-200 font-mono-code text-xs">
+              <div class="text-[10px] text-slate-400 mb-1">实时下发 Twist (/cmd_vel)</div>
+              <div class="flex justify-between py-0.5">
+                <span class="text-slate-600">linear.x:</span>
+                <strong id="valCmdLinX" class="text-slate-900">0.00 m/s</strong>
+              </div>
+              <div class="flex justify-between py-0.5">
+                <span class="text-slate-600">linear.y:</span>
+                <strong id="valCmdLinY" class="text-slate-900">0.00 m/s</strong>
+              </div>
+              <div class="flex justify-between py-0.5">
+                <span class="text-slate-600">angular.z:</span>
+                <strong id="valCmdAngZ" class="text-slate-900">0.00 rad/s</strong>
+              </div>
+            </div>
+
+            <!-- 速度比例滑块 -->
+            <div class="p-2.5 rounded-lg bg-white border border-slate-200">
+              <div class="flex items-center justify-between text-xs mb-1">
+                <span class="text-slate-600 font-medium">限速档位</span>
+                <span id="valSpeedScale" class="font-mono-code font-bold text-blue-600">100%</span>
+              </div>
+              <input id="sliderSpeedScale" type="range" min="25" max="100" step="25" value="100"
+                class="w-full accent-blue-600 cursor-pointer" />
+              <div class="mt-1 text-[10px] text-slate-400 font-mono-code leading-tight">
+                上限: X/Y ±0.20 m/s · Yaw ±0.50 rad/s
+              </div>
+            </div>
+
+            <button id="btnZeroStop" type="button"
+              class="w-full py-1.5 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold transition-colors">
+              立即归零刹车 (Zero Twist)
+            </button>
+          </div>
+        </div>
+
+        <div class="mt-2.5 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
+          <span>支持键盘控制：<code class="px-1 py-0.5 bg-slate-100 rounded font-mono-code">W/S</code> 前后 · <code class="px-1 py-0.5 bg-slate-100 rounded font-mono-code">A/D</code> 横移 · <code class="px-1 py-0.5 bg-slate-100 rounded font-mono-code">Q/E</code> 旋转</span>
+          <button id="btnResetOdom" type="button" class="text-blue-600 hover:underline font-medium">重置里程计 (/set_odom)</button>
+        </div>
+      </div>
+
+      <!-- 6. Nav2 站点导航任务编排器 -->
+      <div class="cockpit-card p-3.5 flex flex-col">
+        <div class="flex items-center justify-between pb-2.5 mb-3 border-b border-slate-100">
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-4 rounded-sm bg-blue-600"></span>
+            <h2 class="text-sm font-bold text-slate-800">Nav2 定位与导航任务</h2>
+          </div>
+          <span id="navGoalStatusBadge" class="px-2 py-0.5 text-[11px] font-mono-code font-semibold rounded bg-slate-100 text-slate-700 border border-slate-200">
+            0: IDLE (待命)
+          </span>
+        </div>
+
+        <div id="navReadinessStatus" role="status" class="mb-3 p-2 rounded bg-amber-50 text-amber-800 text-xs">等待导航状态；启动导航后自动定位，必要时低速原地旋转，请留出整车及机械臂旋转空间。</div>
+        <div id="autoLocalizationStatus" role="status" class="mb-2 text-xs text-slate-600">自动定位：等待导航模块</div>
+        <div class="flex gap-2 mb-3">
+          <button id="btnAutoLocalize" type="button" disabled class="px-3 py-1.5 rounded bg-blue-600 text-white text-xs">重新自动定位</button>
+          <button id="btnCancelAutoLocalize" type="button" disabled class="px-3 py-1.5 rounded bg-slate-200 text-slate-700 text-xs">取消自动定位</button>
+        </div>
+        <div id="initialPoseDraft" class="mb-2 text-xs text-amber-700">手动标注为可选备用，正常启动无需操作</div>
+        <button id="btnConfirmInitialPose" type="button" disabled class="mb-3 px-3 py-1.5 rounded bg-amber-500 text-white text-xs">确认标注为机器人实际位置与朝向</button>
+        <!-- Action 模式切换与循环次数 -->
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-3">
+          <div class="sm:col-span-2">
+            <label for="selectNavActionMode" class="block text-[11px] font-medium text-slate-500 mb-1">
+              ROS 2 Nav2 Action 接口模式
+            </label>
+            <select id="selectNavActionMode"
+              class="w-full px-2.5 py-1.5 text-xs font-mono-code bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-blue-500">
+              <option value="waypoints" selected>逐站巡航（Nav2 单点任务编排 + 驻留）</option>
+              <option value="through_poses">/navigate_through_poses (多点连续平滑轨迹)</option>
+              <option value="single">/navigate_to_pose (单站点直达导航)</option>
+            </select>
+          </div>
+          <div>
+            <label for="inputNavLoops" class="block text-[11px] font-medium text-slate-500 mb-1">
+              巡航循环轮数
+            </label>
+            <input id="inputNavLoops" type="number" min="1" max="99" value="1"
+              class="w-full px-2.5 py-1.5 text-xs font-mono-code bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-blue-500" />
+          </div>
+        </div>
+
+        <!-- Nav2 实时反馈遥测条 -->
+        <div class="grid grid-cols-4 gap-1.5 p-2 rounded-lg bg-slate-50 border border-slate-200 mb-3 text-center font-mono-code">
+          <div>
+            <div class="text-[10px] text-slate-400">当前航点</div>
+            <div id="valNavWpProgress" class="text-xs font-bold text-slate-800">0 / 4</div>
+          </div>
+          <div>
+            <div class="text-[10px] text-slate-400">剩余距离</div>
+            <div id="valNavDistRem" class="text-xs font-bold text-blue-600">0.00 m</div>
+          </div>
+          <div>
+            <div class="text-[10px] text-slate-400">预计剩余</div>
+            <div id="valNavTimeRem" class="text-xs font-bold text-slate-800">0.0 s</div>
+          </div>
+          <div>
+            <div class="text-[10px] text-slate-400">恢复/漏点</div>
+            <div id="valNavRecoveries" class="text-xs font-bold text-slate-800">0 / 0</div>
+          </div>
+        </div>
+
+        <!-- 任务编排控制按钮组（开始 / 软暂停 / 恢复继续 / 取消） -->
+        <div class="grid grid-cols-4 gap-1.5 mb-3">
+          <button id="btnNavStart" type="button"
+            class="py-1.5 px-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors">
+            ▶ 启动任务
+          </button>
+          <button id="btnNavPause" type="button"
+            class="py-1.5 px-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold transition-colors"
+            title="保存当前站点进度并发送 Cancel Goal">
+            ⏸ 软暂停
+          </button>
+          <button id="btnNavResume" type="button"
+            class="py-1.5 px-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold transition-colors"
+            title="从暂停断点重新下发剩余站点序列">
+            ⏯ 断点恢复
+          </button>
+          <button id="btnNavCancel" type="button"
+            class="py-1.5 px-2 rounded-lg bg-slate-200 hover:bg-red-50 hover:text-red-600 text-slate-700 text-xs font-semibold transition-colors">
+            ⏹ 取消Goal
+          </button>
+        </div>
+
+        <!-- 新增站点快捷栏 -->
+        <div class="flex items-center justify-between gap-1.5 mb-2">
+          <span class="text-xs font-semibold text-slate-700">导航站点队列 (支持顺序调整与单独前往)</span>
+          <div class="flex items-center gap-1">
+            <button id="btnAddCurrentPoseWp" type="button"
+              class="px-2 py-1 text-[11px] font-medium rounded bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200">
+              + 存当前车体位姿
+            </button>
+            <button id="btnOpenAddWpModal" type="button"
+              class="px-2 py-1 text-[11px] font-medium rounded bg-slate-100 hover:bg-slate-200 text-slate-700">
+              + 手动输入
+            </button>
+          </div>
+        </div>
+
+        <!-- 站点列表容器 -->
+        <div id="waypointListContainer" class="flex-1 max-h-60 overflow-y-auto flex flex-col gap-1.5 pr-0.5">
+          <!-- JS 动态渲染站点卡片 -->
+        </div>
+
+        <!-- 站点导入/导出底部栏 -->
+        <div class="mt-2.5 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">
+          <span id="valMissedWaypointsNote" class="text-slate-400 font-mono-code">missed_waypoints: []</span>
+          <div class="flex items-center gap-2">
+            <button id="btnExportWaypoints" type="button" class="text-blue-600 hover:underline font-medium">导出站点 JSON</button>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- ==================== 弹窗 1：连接端口与网络配置模态框 ==================== -->
+  <div id="modalConnection" class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4">
+    <div class="bg-white rounded-xl border border-slate-200 shadow-xl max-w-md w-full p-5">
+      <div class="flex items-center justify-between pb-3 mb-4 border-b border-slate-100">
+        <h3 class="text-base font-bold text-slate-900">局域网连接与端口参数配置</h3>
+        <button id="btnCloseConnModal" type="button" class="text-slate-400 hover:text-slate-600 text-sm">✕</button>
+      </div>
+      <div class="space-y-3 text-xs">
+        <div>
+          <label for="modalInputIp" class="block font-medium text-slate-700 mb-1">机器人固定局域网 IP</label>
+          <input id="modalInputIp" type="text" value="192.168.3.73"
+            class="w-full px-3 py-1.5 font-mono-code border border-slate-200 rounded-lg" />
+        </div>
+        <div class="grid grid-cols-3 gap-2">
+          <div>
+            <label for="modalInputRosPort" class="block font-medium text-slate-700 mb-1">rosbridge 端口</label>
+            <input id="modalInputRosPort" type="number" value="9090"
+              class="w-full px-2.5 py-1.5 font-mono-code border border-slate-200 rounded-lg" />
+          </div>
+          <div>
+            <label for="modalInputVideoPort" class="block font-medium text-slate-700 mb-1">视频流端口</label>
+            <input id="modalInputVideoPort" type="number" value="8080"
+              class="w-full px-2.5 py-1.5 font-mono-code border border-slate-200 rounded-lg" />
+          </div>
+          <div>
+            <label for="modalInputAgentPort" class="block font-medium text-slate-700 mb-1">车端网关端口</label>
+            <input id="modalInputAgentPort" type="number" value="8000"
+              class="w-full px-2.5 py-1.5 font-mono-code border border-slate-200 rounded-lg" />
+          </div>
+        </div>
+        <div class="p-2.5 rounded-lg bg-slate-50 border border-slate-200 font-mono-code text-[11px] text-slate-600 space-y-1">
+          <div id="previewWsUrl">ROS 2 桥接: ws://192.168.3.73:9090</div>
+          <div id="previewVideoUrl">视频流地址: http://192.168.3.73:8080/stream</div>
+          <div id="previewAgentUrl">网关 API: http://192.168.3.73:8000</div>
+        </div>
+      </div>
+      <div class="mt-5 flex justify-end gap-2">
+        <button id="btnCancelConnModal" type="button" class="px-3.5 py-1.5 text-xs font-medium rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">取消</button>
+        <button id="btnSaveConnModal" type="button" class="px-4 py-1.5 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700">保存并应用连接</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 弹窗 2：手动新增/编辑导航站点模态框 ==================== -->
+  <div id="modalWaypoint" class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4">
+    <div class="bg-white rounded-xl border border-slate-200 shadow-xl max-w-sm w-full p-5">
+      <div class="flex items-center justify-between pb-3 mb-4 border-b border-slate-100">
+        <h3 class="text-base font-bold text-slate-900">新增 Nav2 导航站点</h3>
+        <button id="btnCloseWpModal" type="button" class="text-slate-400 hover:text-slate-600 text-sm">✕</button>
+      </div>
+      <div class="space-y-3 text-xs">
+        <div>
+          <label for="wpInputName" class="block font-medium text-slate-700 mb-1">站点名称</label>
+          <input id="wpInputName" type="text" value="巡检点 E (走廊北)"
+            class="w-full px-3 py-1.5 border border-slate-200 rounded-lg" />
+        </div>
+        <div class="grid grid-cols-3 gap-2">
+          <div>
+            <label for="wpInputX" class="block font-medium text-slate-700 mb-1">X 坐标 (m)</label>
+            <input id="wpInputX" type="number" step="0.1" value="2.20"
+              class="w-full px-2.5 py-1.5 font-mono-code border border-slate-200 rounded-lg" />
+          </div>
+          <div>
+            <label for="wpInputY" class="block font-medium text-slate-700 mb-1">Y 坐标 (m)</label>
+            <input id="wpInputY" type="number" step="0.1" value="-1.40"
+              class="w-full px-2.5 py-1.5 font-mono-code border border-slate-200 rounded-lg" />
+          </div>
+          <div>
+            <label for="wpInputYaw" class="block font-medium text-slate-700 mb-1">朝向 Yaw (°)</label>
+            <input id="wpInputYaw" type="number" step="5" value="90"
+              class="w-full px-2.5 py-1.5 font-mono-code border border-slate-200 rounded-lg" />
+          </div>
+        </div>
+        <div>
+          <label for="wpInputDwell" class="block font-medium text-slate-700 mb-1">到达后驻留时间 (秒)</label>
+          <input id="wpInputDwell" type="number" step="0.5" min="0" value="2.0"
+            class="w-full px-3 py-1.5 font-mono-code border border-slate-200 rounded-lg" />
+        </div>
+      </div>
+      <div class="mt-5 flex justify-end gap-2">
+        <button id="btnCancelWpModal" type="button" class="px-3.5 py-1.5 text-xs font-medium rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">取消</button>
+        <button id="btnConfirmAddWp" type="button" class="px-4 py-1.5 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700">添加至站点库</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 弹窗 3：在线 ROS 2 节点拓扑与 JSON 导出模态框 ==================== -->
+  <div id="modalInfoViewer" class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4">
+    <div class="bg-white rounded-xl border border-slate-200 shadow-xl max-w-lg w-full p-5">
+      <div class="flex items-center justify-between pb-3 mb-3 border-b border-slate-100">
+        <h3 id="modalInfoTitle" class="text-base font-bold text-slate-900">ROS 2 节点拓扑与接口核验</h3>
+        <button id="btnCloseInfoModal" type="button" class="text-slate-400 hover:text-slate-600 text-sm">✕</button>
+      </div>
+      <pre id="modalInfoPre" class="p-3 rounded-lg bg-slate-900 text-slate-100 font-mono-code text-xs max-h-80 overflow-y-auto whitespace-pre-wrap"></pre>
+      <div class="mt-4 flex justify-end gap-2">
+        <button id="btnCopyInfoModal" type="button" class="px-3.5 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100">复制内容</button>
+        <button id="btnOkInfoModal" type="button" class="px-4 py-1.5 text-xs font-semibold rounded-lg bg-slate-800 text-white hover:bg-slate-900">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 全局非阻塞 Toast 通知 -->
+  <div id="toastContainer" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm pointer-events-none"></div>
+
+  <!-- ==================== 核心交互与 ROS 2 协议栈逻辑 ==================== -->
+  <script src="cockpit_transport.js?v=1.8.0"></script>
+  <script src="live_map.js?v=1.8.0"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      // ==================== 1. 全局状态模型 ====================
+      const state = {
+        mode: 'live', // 'sim' | 'live'
+        robotIp: '192.168.3.73',
+        rosbridgePort: 9090,
+        videoPort: 8080,
+        agentPort: 8000,
+        wsRos: null,
+        wsAgent: null,
+        rosConnected: false,
+        agentConnected: false,
+
+        // 软急停状态
+        estopEngaged: false,
+
+        // 底盘速度与位姿状态 (/cmd_vel 严格限幅 X/Y ±0.20, Z ±0.50)
+        speedScale: 1.0,
+        cmdVel: { lx: 0.0, ly: 0.0, az: 0.0 },
+        lastCmdTimestamp: 0,
+        robotPose: { x: 0.0, y: 0.0, yaw: 0.0 }, // 单位: m, m, rad
+
+        // 硬件状态看板 (Jetson Orin NX Super + /ros_robot_controller/battery)
+        batteryHasSample: true,
+        batteryMv: 12380,
+        batteryLastTs: Date.now(),
+        lowVoltThreshold: 10.6,
+        hw: {
+          cpuPercent: 24.6,
+          gpuPercent: 18.2,
+          ramUsedGb: 6.1,
+          ramTotalGb: 15.6,
+          ramPercent: 39.1,
+          diskUsedGb: 42.8,
+          diskTotalGb: 118.0,
+          diskPercent: 36.3,
+          cpuTempC: 48.5,
+          gpuTempC: 46.0,
+        },
+
+        // 单路相机视频流
+        selectedCameraTopic: '/depth_cam/rgb/image_raw',
+        showCrosshair: true,
+        camFrameTick: 0,
+
+        // 2D / 3D 地图与图层
+        mapViewMode: '2d', // '2d' | '3d'
+        mapTool: 'pan',    // 'pan' | 'initialpose' | 'goalpose' | 'pickwp'
+        layers: {
+          map: true,
+          scan: true,
+          costmap: true,
+          plan: true,
+          waypoints: true,
+        },
+        mapPan: { x: 0, y: 0, zoom: 42 }, // 每米像素数
+        dragState: {
+          active: false,
+          startX: 0,
+          startY: 0,
+          worldStartX: 0,
+          worldStartY: 0,
+          worldCurrX: 0,
+          worldCurrY: 0,
+        },
+        scanPoints: [], // [{x, y}] 世界坐标系下激光点
+
+        // 环境障碍物定义 (用于 2D OccupancyGrid 与 G4 激光射线仿真)
+        obstacles: [
+          { x: -4.5, y: -3.5, w: 9.0, h: 0.25 }, // 南墙
+          { x: -4.5, y: 3.25, w: 9.0, h: 0.25 }, // 北墙
+          { x: -4.5, y: -3.5, w: 0.25, h: 7.0 }, // 西墙
+          { x: 4.25, y: -3.5, w: 0.25, h: 7.0 }, // 东墙
+          { x: -1.8, y: 0.8, w: 1.4, h: 0.9 },   // 实验台 A
+          { x: 1.4, y: -1.6, w: 1.5, h: 1.0 },   // 机柜 B
+          { x: 1.6, y: 1.2, w: 0.9, h: 0.9 },    // 立柱 C
+        ],
+
+        // Nav2 站点导航任务编排
+        navMode: 'waypoints', // 'waypoints' | 'through_poses' | 'single'
+        navLoops: 1,
+        navStatus: {
+          code: 0, // 0 IDLE, 1 ACCEPTED, 2 EXECUTING, 3 CANCELING, 4 SUCCEEDED, 5 CANCELED, 6 ABORTED
+          text: '0: IDLE (待命)',
+          currentWpIdx: 0,
+          currentLoop: 1,
+          distRemaining: 0.0,
+          timeRemaining: 0.0,
+          navTimeStart: 0,
+          recoveries: 0,
+          missedWaypoints: [],
+          paused: false,
+          activePath: [],
+          dwellTimer: 0,
+        },
+        waypoints: [
+          { id: 'wp-1', name: '充电基站 (Origin)', x: 0.0, y: 0.0, yawDeg: 0, dwellSec: 1.5 },
+          { id: 'wp-2', name: 'A区视觉采集工位', x: 2.6, y: 0.2, yawDeg: 45, dwellSec: 2.0 },
+          { id: 'wp-3', name: 'B区北侧通道巡检点', x: 0.4, y: 2.2, yawDeg: 180, dwellSec: 2.0 },
+          { id: 'wp-4', name: 'C区西侧设备间', x: -2.6, y: -1.2, yawDeg: -90, dwellSec: 1.5 },
+        ],
+
+        // ROS 2 Launch 模块状态 (不含 start_app_node.service 强制关闭，独立进程组管理)
+        launchModules: [
+          {
+            id: 'controller',
+            name: '底盘控制与 EKF 融合',
+            cmd: 'ros2 launch controller controller.launch.py',
+            running: true,
+            pid: 4821,
+            conflictsWith: [],
+            badge: '核心底盘',
+          },
+          {
+            id: 'depth_camera',
+            name: 'Astra Pro Plus 深度相机',
+            cmd: 'ros2 launch peripherals depth_camera.launch.py',
+            running: true,
+            pid: 4910,
+            conflictsWith: [],
+            badge: '传感器',
+          },
+          {
+            id: 'lidar',
+            name: 'YDLIDAR G4 雷达与滤波',
+            cmd: 'ros2 launch peripherals lidar.launch.py',
+            running: true,
+            pid: 4988,
+            conflictsWith: [],
+            badge: '传感器',
+          },
+          {
+            id: 'slam',
+            name: '2D SLAM 建图 (slam.launch)',
+            cmd: 'ros2 launch slam slam.launch.py',
+            running: false,
+            pid: null,
+            conflictsWith: ['navigation'],
+            badge: '与导航互斥',
+          },
+          {
+            id: 'navigation',
+            name: 'Nav2 自主导航 (navigation)',
+            cmd: 'ros2 launch navigation navigation.launch.py',
+            running: true,
+            pid: 5124,
+            conflictsWith: ['slam'],
+            badge: '与建图互斥',
+          },
+          {
+            id: 'web_video_server',
+            name: 'Web 视频流服务 (:8080)',
+            cmd: 'ros2 run web_video_server web_video_server',
+            running: true,
+            pid: 5209,
+            conflictsWith: [],
+            badge: 'MJPEG 流',
+          },
+        ],
+      };
+
+      // ==================== 2. 工具函数：Toast 与日志输出 ====================
+      function showToast(message, type) {
+        const container = document.getElementById('toastContainer');
+        if (!container) return;
+        const el = document.createElement('div');
+        const colorMap = {
+          info: 'bg-slate-900 text-white border-slate-700',
+          success: 'bg-emerald-600 text-white border-emerald-500',
+          warn: 'bg-amber-500 text-white border-amber-400',
+          danger: 'bg-red-600 text-white border-red-500',
+        };
+        el.className = 'pointer-events-auto px-3.5 py-2 rounded-lg border shadow-lg text-xs font-medium transition-all ' + (colorMap[type] || colorMap.info);
+        el.textContent = message;
+        container.appendChild(el);
+        setTimeout(function () {
+          el.style.opacity = '0';
+          setTimeout(function () {
+            if (el.parentNode) el.parentNode.removeChild(el);
+          }, 250);
+        }, 3200);
+      }
+
+      function appendLog(source, text) {
+        const consoleEl = document.getElementById('launchLogConsole');
+        if (!consoleEl) return;
+        const now = new Date();
+        const ts = now.toTimeString().split(' ')[0];
+        const line = document.createElement('div');
+        line.innerHTML = '<span class="text-slate-500">[' + ts + ']</span> <span class="text-blue-400">[' + source + ']</span> ' + escapeHtml(text);
+        consoleEl.appendChild(line);
+        consoleEl.scrollTop = consoleEl.scrollHeight;
+      }
+
+      function degToRad(deg) { return (deg * Math.PI) / 180; }
+      function radToDeg(rad) { return (rad * 180) / Math.PI; }
+      function normalizeAngle(rad) {
+        while (rad > Math.PI) rad -= 2 * Math.PI;
+        while (rad < -Math.PI) rad += 2 * Math.PI;
+        return rad;
+      }
+
+      // ==================== 3. 实车连接与模式管理 (192.168.3.73) ====================
+      function updateConnectionBadges() {
+        const btnSim = document.getElementById('btnModeSim');
+        const btnLive = document.getElementById('btnModeLive');
+        const dot = document.getElementById('connStatusDot');
+        const bRos = document.getElementById('badgeRosbridge');
+        const bVid = document.getElementById('badgeVideoServer');
+        const bApi = document.getElementById('badgeAgentServer');
+        const watchdog = document.getElementById('badgeWatchdog');
+        watchdog.textContent = state.mode === 'sim' ? '演示控制' : (state.controlConnected ? '网关 500ms 超时停车' : '控制通道未连接');
+
+        if (state.mode === 'sim') {
+          btnSim.className = 'px-2.5 py-1 text-xs font-medium rounded transition-colors bg-blue-600 text-white';
+          btnLive.className = 'px-2.5 py-1 text-xs font-medium rounded transition-colors text-slate-600 hover:text-slate-900';
+          dot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-500';
+          bRos.textContent = 'WS:' + state.rosbridgePort + ' 仿真就绪';
+          bRos.className = 'px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200';
+          bVid.textContent = 'CAM:' + state.videoPort + ' 合成流';
+          bApi.textContent = 'API:' + state.agentPort + ' 仿真网关';
+        } else {
+          btnLive.className = 'px-2.5 py-1 text-xs font-medium rounded transition-colors bg-blue-600 text-white';
+          btnSim.className = 'px-2.5 py-1 text-xs font-medium rounded transition-colors text-slate-600 hover:text-slate-900';
+          dot.className = transport.canControl()
+            ? 'w-2.5 h-2.5 rounded-full bg-emerald-500'
+            : 'w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse';
+          bRos.textContent = state.rosConnected
+            ? ('WS:' + state.rosbridgePort + ' 已连接')
+            : ('WS:' + state.rosbridgePort + ' 未连接');
+          bRos.className = state.rosConnected
+            ? 'px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200'
+            : 'px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200';
+          bVid.textContent = 'CAM:' + state.videoPort + (state.videoOnline ? ' 已收到画面' : ' 等待画面');
+          [bVid, bApi].forEach(function (el) { el.className = 'px-1.5 py-0.5 rounded border ' + ((el === bVid ? state.videoOnline : state.agentConnected) ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'); });
+          bApi.textContent = state.agentConnected ? ('API:' + state.agentPort + (transport.canControl() ? ' 控制就绪' : ' 控制未就绪')) : ('API:' + state.agentPort + ' 未连接');
+        }
+      }
+
+      const demoSeed = JSON.parse(JSON.stringify({
+        hw: state.hw, modules: state.launchModules, obstacles: state.obstacles, waypoints: state.waypoints,
+      }));
+      state.controlConnected = false;
+      state.controlReady = false;
+      state.lastOdomTs = 0;
+      state.telemetryTs = 0;
+      state.videoOnline = false;
+      let lastError = '';
+      let lastErrorTs = 0;
+      const seenLogs = new Set();
+      function reportError(message) {
+        if (message !== lastError || Date.now() - lastErrorTs > 5000) {
+          appendLog('ERROR', message);
+          showToast(message, 'danger');
+          lastError = message;
+          lastErrorTs = Date.now();
+        }
+      }
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, function (c) {
+          return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+      }
+      function resetLocalCommand() {
+        state.cmdVel = { lx: 0, ly: 0, az: 0 };
+        resetJoystickUI();
+        ['valCmdLinX', 'valCmdLinY'].forEach(function (id) { document.getElementById(id).textContent = '0.00 m/s'; });
+        document.getElementById('valCmdAngZ').textContent = '0.00 rad/s';
+      }
+      function renderEstop() {
+        document.getElementById('estopStatusBanner').classList.toggle('hidden', !state.estopEngaged);
+        document.getElementById('estopStatusBanner').classList.toggle('flex', state.estopEngaged);
+        document.getElementById('btnReleaseEstop').classList.toggle('hidden', !state.estopEngaged);
+        document.getElementById('btnSoftEstop').classList.toggle('ring-4', state.estopEngaged);
+        document.getElementById('btnSoftEstop').classList.toggle('ring-red-300', state.estopEngaged);
+      }
+      function applyLaunches(modules) {
+        const before = JSON.stringify(state.launchModules);
+        state.launchModules = modules.map(function (m) {
+          (m.recent_logs || []).forEach(function (line) {
+            const key = m.id + ':' + line;
+            if (!seenLogs.has(key)) { seenLogs.add(key); appendLog(m.id, line); }
+          });
+          return Object.assign({}, m, { known: true, conflictsWith: m.conflicts_with || [],
+            badge: m.external ? '外部进程（只读）' : (m.running ? '受管进程；不代表 ROS 就绪' : '已停止') });
+        });
+        if (seenLogs.size > 3000) seenLogs.clear();
+        if (before !== JSON.stringify(state.launchModules)) renderLaunchModules();
+      }
+      function clearLiveData() {
+        state.batteryHasSample = false;
+        state.telemetryTs = 0;
+        state.lastOdomTs = 0;
+        state.scanPoints = [];
+        state.obstacles = [];
+        state.waypoints = [];
+        state.navStatus.activePath = [];
+        state.navStatus.code = 0;
+        state.navStatus.text = '等待导航与初始位姿';
+        state.navigationAvailable=false;state.initialPoseDraft=null;state.navReadiness={ready:false,reasons:[]};
+        state.activeNavigationPoints=[];
+        Object.keys(state.hw).forEach(function (k) { state.hw[k] = NaN; });
+        state.launchModules.forEach(function (m) {
+          m.running = false; m.pid = null; m.known = false; m.external = false;
+        });
+        renderLaunchModules(); renderWaypointsList(); updateNavUI();
+      }
+      function setText(id, text) {
+        const el=document.getElementById(id);
+        if (el.textContent!==text) el.textContent=text;
+      }
+      const liveMap = new LiveMapView(document.getElementById('mapCanvas2D'), function (status) {
+        if (state.mode!=='live') return;
+        setText('liveMapStatus', status.text);
+        setText('liveTfStatus', status.tfText);
+        setText('mapFrameLabel', '坐标系：'+status.frame);
+        setText('mapResolution', liveMap.map ? '分辨率：'+liveMap.map.resolution.toFixed(3)+' m/格' : '分辨率：等待地图');
+      });
+      let savedMapsRequested=false, savedMapPending=false;
+      let savedMapState={active:false,running:false};
+      function updateSavedMapButtons() {
+        const online=state.mode==='live' && state.agentConnected;
+        document.getElementById('btnLoadSavedMap').disabled=!online || savedMapPending;
+        document.getElementById('btnUnloadSavedMap').disabled=!online || savedMapPending || !savedMapState.running;
+        document.getElementById('btnLoadSavedMap').textContent=savedMapPending?'处理中…':'加载地图（仅显示）';
+      }
+      async function refreshSavedMaps() {
+        if (state.mode!=='live' || !state.agentConnected) return;
+        try {
+          const result=await transport.api('/api/maps');
+          const list=document.getElementById('savedMapNames');list.replaceChildren();
+          (result.maps || []).forEach(function(map) {
+            const option=document.createElement('option');option.value=map.name;list.appendChild(option);
+          });
+          savedMapState=result.saved_map || savedMapState;
+          setText('savedMapStatus',savedMapState.active?'已加载：'+savedMapState.name:
+            '可用地图：'+(result.maps || []).map(m=>m.name).join('、'));
+        } catch (err) { setText('savedMapStatus','地图列表读取失败，请确认后端已更新：'+err.message); }
+        updateSavedMapButtons();
+      }
+      async function controlSavedMap(load) {
+        if (state.mode!=='live' || !state.agentConnected || savedMapPending) return;
+        savedMapPending=true;updateSavedMapButtons();
+        setText('savedMapStatus',load?'正在加载并激活地图服务…':'正在停止受管地图服务…');
+        try {
+          const result=await transport.api(load?'/api/map/load':'/api/map/unload',
+            load?{name:document.getElementById('inputNavMapPath').value.trim()}:{},20000);
+          setText('savedMapStatus',load?'已激活地图：'+result.name+'；等待 /map 到达':'保存地图服务已停止');
+          if (load) { liveMap.autoFit=true; liveMap.needsFit=true; }
+          savedMapState={running:load,active:load,name:result.name};
+        } catch (err) { setText('savedMapStatus','操作失败：'+err.message);reportError(err.message); }
+        finally { savedMapPending=false;updateSavedMapButtons(); }
+      }
+      let navRequestPending=false;
+      state.navigationAvailable=false;state.initialPoseDraft=null;state.navReadiness={ready:false,reasons:[]};
+      state.activeNavigationPoints=[];
+      function updateNavControls() {
+        if (state.mode!=='live') return;
+        const n=state.navStatus, online=state.agentConnected && state.navigationAvailable;
+        const busy=[1,2,3].includes(n.code);
+        const locating=['WAITING','MATCHING','ROTATING','VERIFYING'].includes(state.localization?.state);
+        document.getElementById('btnAutoLocalize').disabled=!online || busy || locating || navRequestPending;
+        document.getElementById('btnCancelAutoLocalize').disabled=!online || !locating || navRequestPending;
+        document.getElementById('btnNavStart').disabled=!online || !state.navReadiness.ready || busy || navRequestPending;
+        document.getElementById('btnNavPause').disabled=!online || ![1,2].includes(n.code) || navRequestPending;
+        document.getElementById('btnNavResume').disabled=!online || !n.paused || !state.navReadiness.ready || navRequestPending;
+        document.getElementById('btnNavCancel').disabled=!online || (!busy && !n.paused) || navRequestPending;
+        const canPose=online && state.navReadiness.lifecycle?.amcl===3 && !busy && !locating && !!liveMap.map;
+        document.getElementById('btnConfirmInitialPose').disabled=!canPose || !state.initialPoseDraft || navRequestPending;
+        document.querySelectorAll('.map-tool-btn').forEach(function(el){
+          const tool=el.getAttribute('data-tool');
+          el.disabled=tool==='initialpose'?!canPose:(tool==='goalpose'?(!online || !state.navReadiness.ready || busy):false);
+          el.title=el.disabled?'等待地图、AMCL 或导航就绪':'';
+        });
+        document.getElementById('chkLayerPlan').disabled=false;
+        document.getElementById('chkLayerWaypoints').disabled=false;
+      }
+      function applyNavigation(data) {
+        state.navigationAvailable=!!data.capabilities?.navigation;
+        const n=data.nav_state || {};
+        state.localization=n.localization || {state:'UNAVAILABLE',message:'网关未提供自动定位，请更新到 v1.8'};
+        setText('autoLocalizationStatus','自动定位：'+state.localization.message+
+          (state.localization.state==='ROTATING'?'；已转 '+state.localization.rotation_degrees+'°':'')+
+          (state.localization.match?'；匹配 '+Math.round(state.localization.match.hit_ratio*100)+'%，候选差 '+state.localization.match.margin.toFixed(3):''));
+        state.navReadiness=n.readiness || {ready:false,reasons:['请更新导航网关']};
+        Object.assign(state.navStatus,{code:n.status_code || 0,text:(n.status_text || 'IDLE')+(n.error?'：'+n.error:''),
+          currentWpIdx:n.current_waypoint_index || 0,currentLoop:n.current_loop || 1,total:n.total_waypoints || 0,
+          distRemaining:n.distance_remaining || 0,timeRemaining:n.estimated_time_remaining || 0,
+          recoveries:n.number_of_recoveries || 0,paused:!!n.paused});
+        state.activeNavigationPoints=n.waypoints || [];
+        setText('navReadinessStatus',state.navReadiness.ready?'定位、TF 与导航节点已就绪':
+          (state.navReadiness.reasons || []).join('；') || '等待导航状态');
+        updateNavUI();updateNavControls();
+      }
+      async function confirmInitialPose() {
+        if (!state.initialPoseDraft || navRequestPending) return;
+        navRequestPending=true;updateNavControls();
+        try {
+          await transport.api('/api/localization/initialpose',Object.assign({},state.initialPoseDraft,{confirmed:true}));
+          state.initialPoseDraft=null;setText('initialPoseDraft','已提交，等待 AMCL 更新定位和 TF');
+          showToast('初始位姿已提交，定位就绪前禁止导航','info');
+        } catch(err){reportError(err.message);}
+        finally{navRequestPending=false;updateNavControls();}
+      }
+      async function startLiveNavigation(mode,startIdx) {
+        if (navRequestPending) return;
+        if (!state.navReadiness.ready) {reportError((state.navReadiness.reasons || []).join('；') || '导航未就绪');return;}
+        const index=Number.isInteger(startIdx)?startIdx:0;
+        const list=mode==='single'?[state.waypoints[index]]:state.waypoints.slice(index);
+        if (!list.length || !list[0]) {reportError('请先添加或在地图拾取导航站点');return;}
+        const points=list.map(function(wp){return {id:wp.id,name:wp.name,x:wp.x,y:wp.y,yaw_deg:wp.yawDeg,dwell_sec:wp.dwellSec || 0};});
+        navRequestPending=true;updateNavControls();
+        try {
+          const result=await transport.api('/api/navigation/task',{mode,waypoints:points,loop_count:parseInt(document.getElementById('inputNavLoops').value,10) || 1});
+          appendLog('NAV2','任务已提交，等待 Action 接受：'+result.task_id);
+          showToast('任务已提交，状态以 Nav2 反馈为准','info');
+        } catch(err){reportError(err.message);}
+        finally{navRequestPending=false;updateNavControls();}
+      }
+      async function navigationAction(action) {
+        if (navRequestPending) return;
+        navRequestPending=true;updateNavControls();
+        try {
+          await transport.api('/api/navigation/'+action,{});
+          showToast('已请求'+({pause:'暂停',resume:'恢复',cancel:'取消'}[action])+'，等待 Nav2 状态更新','info');
+        } catch(err){reportError(err.message);}
+        finally{navRequestPending=false;updateNavControls();}
+      }
+      async function automaticLocalization(action) {
+        if(navRequestPending)return;
+        navRequestPending=true;updateNavControls();
+        try {
+          await transport.api('/api/localization/'+action,{});
+          showToast(action==='auto'?'已启动自动定位，请保持机器人静止':'已取消自动定位','info');
+        } catch(err){reportError(err.message);}
+        finally{navRequestPending=false;updateNavControls();}
+      }
+      const transport = new CockpitTransport({
+        reset: resetLocalCommand,
+        error: reportError,
+        status: function (c) {
+          state.rosConnected = c.ros;
+          state.agentConnected = c.agent;
+          updateNavControls();
+          if (!c.agent) savedMapsRequested=false;
+          updateSavedMapButtons();
+          if (c.agent && state.mode==='live' && !savedMapsRequested) { savedMapsRequested=true;refreshSavedMaps(); }
+          state.controlConnected = c.control;
+          if (!c.agent) {
+            state.controlReady = false;
+            document.getElementById('controlIssues').textContent = '网关遥测未连接；启动按钮等待真实模块状态';
+            state.telemetryTs = 0;
+            state.launchModules.forEach(function (m) { m.known = false; });
+            renderLaunchModules();
+          }
+          renderLaunchModules();
+          updateConnectionBadges();
+        },
+        ros: function (data) {
+          if (state.mode !== 'live' || data.topic !== '/odom' || !data.msg) return;
+          const p = data.msg.pose.pose.position;
+          const q = data.msg.pose.pose.orientation;
+          state.robotPose = { x: p.x, y: p.y,
+            yaw: Math.atan2(2*(q.w*q.z+q.x*q.y), 1-2*(q.y*q.y+q.z*q.z)) };
+          state.lastOdomTs = Date.now();
+        },
+        telemetry: function (data) {
+          if (state.mode !== 'live') return;
+          state.telemetryTs = Date.now();
+          state.controlReady = !!data.control_ready;
+          document.getElementById('controlIssues').textContent = (data.control_issues || []).join('；') || (data.control_ready ? '底盘控制链已就绪' : '控制未就绪，请检查底盘驱动与急停状态');
+          state.estopEngaged = !!data.estop_engaged;
+          if (data.saved_map) {
+            savedMapState=data.saved_map;
+            if (!savedMapPending && savedMapState.error) setText('savedMapStatus','地图服务错误：'+savedMapState.error);
+            updateSavedMapButtons();
+          }
+          applyNavigation(data);
+          state.graph = data.graph;
+          state.rosDomain = data.ros_domain_id;
+          const h = data.hardware;
+          const fields = { cpuPercent:'cpu_percent', gpuPercent:'gpu_percent', cpuTempC:'cpu_temp_c',
+            gpuTempC:'gpu_temp_c', ramUsedGb:'ram_used_gb', ramTotalGb:'ram_total_gb', ramPercent:'ram_percent',
+            diskUsedGb:'disk_used_gb', diskTotalGb:'disk_total_gb', diskPercent:'disk_percent' };
+          Object.keys(fields).forEach(function (k) { state.hw[k] = Number.isFinite(h[fields[k]]) ? h[fields[k]] : NaN; });
+          state.batteryHasSample = Number.isFinite(h.battery_voltage_v) && h.battery_sample_age_sec < 5;
+          state.batteryMv = state.batteryHasSample ? Math.round(h.battery_voltage_v * 1000) : 0;
+          state.batteryLastTs = Date.now() - (h.battery_sample_age_sec || 0) * 1000;
+          renderEstop(); applyLaunches(data.launches || []); telemetrySecondTick();
+        },
+      });
+      function setMode(mode) {
+        transport.close();
+        liveMap.close();
+        state.mode = mode;
+        updateSavedMapButtons();
+        resetLocalCommand();
+        state.videoOnline = false;
+        if (threeCtx) {
+          threeCtx.renderer.dispose();
+          document.getElementById('mapContainer3D').innerHTML = '';
+          threeCtx = null;
+        }
+        if (mode === 'live') {
+          clearLiveData();
+          connectLiveRobot();
+        } else {
+          state.hw = JSON.parse(JSON.stringify(demoSeed.hw));
+          state.launchModules = JSON.parse(JSON.stringify(demoSeed.modules));
+          state.obstacles = JSON.parse(JSON.stringify(demoSeed.obstacles));
+          state.waypoints = JSON.parse(JSON.stringify(demoSeed.waypoints));
+          state.robotPose = { x:0, y:0, yaw:0 };
+          state.estopEngaged = false;
+          state.batteryHasSample = true; state.batteryMv = 12380;
+          state.navStatus.text = '演示模式：IDLE';
+          setText('liveMapStatus','演示地图：模拟数据');
+          setText('liveTfStatus','演示坐标系');
+          setText('mapFrameLabel','坐标系：演示 map');
+          setText('mapResolution','演示分辨率：0.05 m/格');
+          renderLaunchModules(); renderWaypointsList(); renderEstop(); updateNavUI();
+          refreshCameraStreamSource();
+        }
+        ['btnResetOdom','btnToggleBatterySim','btnSnapshotCam','btnView3D'].forEach(function (id) {
+          const el = document.getElementById(id);
+          el.disabled = mode === 'live';
+          el.title = mode === 'live' ? '当前版本未接入此实车功能' : '';
+        });
+        ['chkLayerCostmap','chkLayerPlan','chkLayerWaypoints'].forEach(function (id) {
+          const el=document.getElementById(id); el.disabled=mode==='live';
+          el.title=mode==='live' && id==='chkLayerCostmap'?'当前未接入实车代价地图图层':'';
+        });
+        document.querySelectorAll('.map-tool-btn').forEach(function (el) {
+          el.disabled=mode==='live' && el.getAttribute('data-tool')!=='pan';
+          el.title=el.disabled?'等待地图、AMCL 或导航就绪':'';
+        });
+        state.mapTool='pan';
+        if (mode === 'live') {document.getElementById('btnView2D').click();updateNavControls();}
+        else ['btnNavStart','btnNavPause','btnNavResume','btnNavCancel'].forEach(id=>document.getElementById(id).disabled=false);
+        document.getElementById('badgeLdpStatus').textContent = mode === 'live' ? 'LDP 未查询' : '演示状态';
+        updateConnectionBadges();
+      }
+      function connectLiveRobot() {
+        state.robotIp = document.getElementById('inputRobotIp').value.trim() || '192.168.3.73';
+        if (state.mode !== 'live') return;
+        clearLiveData();
+        transport.start({ ip: state.robotIp, rosPort: state.rosbridgePort, agentPort: state.agentPort });
+        liveMap.start({ip:state.robotIp,agentPort:state.agentPort});
+        appendLog('NET', '连接实车网关与 rosbridge：' + state.robotIp);
+        refreshCameraStreamSource();
+      }
+
+      // ==================== 4. 单路相机视频流与合成渲染 ====================
+      function refreshCameraStreamSource() {
+        state.videoAttemptTs = Date.now();
+        const topic = state.selectedCameraTopic;
+        const img = document.getElementById('liveCameraImg');
+        const canvas = document.getElementById('cameraCanvas');
+        const overlay = document.getElementById('camStreamStateOverlay');
+        document.getElementById('camTopicOverlay').textContent = topic;
+        state.videoOnline = false;
+        img.onload = img.onerror = null;
+        img.removeAttribute('src');
+        img.classList.add('hidden');
+        canvas.classList.toggle('hidden', state.mode === 'live');
+        if (state.mode === 'sim') { overlay.textContent = '演示画面'; return; }
+        overlay.className = 'px-2 py-0.5 rounded bg-amber-600 text-white text-[10px] font-mono-code';
+        if (topic === '/depth_cam/depth/image_raw') {
+          overlay.textContent = '原始 16UC1 深度不能直接作为彩色视频';
+          updateConnectionBadges(); return;
+        }
+        const requestedUrl = 'http://' + state.robotIp + ':' + state.videoPort + '/stream?topic=' +
+          encodeURI(topic) + '&type=mjpeg&quality=80&t=' + Date.now();
+        overlay.textContent = '正在连接视频 :8080…';
+        const timeout = setTimeout(function () {
+          if (img.getAttribute('src') === requestedUrl && !state.videoOnline) {
+            overlay.textContent = '尚未收到视频帧，请检查相机和 8080 服务';
+          }
+        }, 8000);
+        img.onload = function () {
+          if (state.mode !== 'live' || img.getAttribute('src') !== requestedUrl) return;
+          clearTimeout(timeout); state.videoOnline = true;
+          img.classList.remove('hidden');
+          overlay.textContent = '实车 MJPEG';
+          overlay.className = 'px-2 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-mono-code';
+          updateConnectionBadges();
+        };
+        img.onerror = function () {
+          if (img.getAttribute('src') !== requestedUrl) return;
+          clearTimeout(timeout); state.videoOnline = false; img.classList.add('hidden');
+          overlay.textContent = '视频连接失败：检查相机节点、RGB 话题与 8080';
+          overlay.className = 'px-2 py-0.5 rounded bg-red-600 text-white text-[10px] font-mono-code';
+          updateConnectionBadges();
+        };
+        img.src = requestedUrl;
+      }
+
+      function renderCameraCanvas() {
+        const canvas = document.getElementById('cameraCanvas');
+        if (!canvas || canvas.classList.contains('hidden')) return;
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width;
+        const h = canvas.height;
+        state.camFrameTick += 1;
+
+        const videoModule = state.launchModules.find(function (m) { return m.id === 'web_video_server'; });
+        const camModule = state.launchModules.find(function (m) { return m.id === 'depth_camera'; });
+
+        if (!videoModule.running || !camModule.running) {
+          ctx.fillStyle = '#0F172A';
+          ctx.fillRect(0, 0, w, h);
+          ctx.fillStyle = '#94A3B8';
+          ctx.font = '16px Inter, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('视频流未就绪：请确认 depth_camera 与 web_video_server 已启动', w / 2, h / 2);
+          return;
+        }
+
+        const topic = state.selectedCameraTopic;
+        const yawOffset = Math.sin(state.robotPose.yaw) * 70;
+        const fwdOffset = (state.robotPose.x * 15) % 40;
+
+        if (topic === '/depth_cam/rgb/image_raw') {
+          // 渲染第一视角实验室走廊 RGB 画面
+          const skyGrad = ctx.createLinearGradient(0, 0, 0, h * 0.52);
+          skyGrad.addColorStop(0, '#1E293B');
+          skyGrad.addColorStop(1, '#334155');
+          ctx.fillStyle = skyGrad;
+          ctx.fillRect(0, 0, w, h * 0.52);
+
+          const floorGrad = ctx.createLinearGradient(0, h * 0.52, 0, h);
+          floorGrad.addColorStop(0, '#475569');
+          floorGrad.addColorStop(1, '#1E293B');
+          ctx.fillStyle = floorGrad;
+          ctx.fillRect(0, h * 0.52, w, h * 0.48);
+
+          // 透视网格线
+          ctx.strokeStyle = 'rgba(148, 163, 184, 0.25)';
+          ctx.lineWidth = 1;
+          const vx = w / 2 - yawOffset;
+          const vy = h * 0.52;
+          for (let i = -6; i <= 6; i++) {
+            ctx.beginPath();
+            ctx.moveTo(vx, vy);
+            ctx.lineTo(w / 2 + i * 95, h);
+            ctx.stroke();
+          }
+          for (let r = 1; r <= 5; r++) {
+            const yLine = vy + ((r * 42 + fwdOffset) % 210);
+            ctx.beginPath();
+            ctx.moveTo(0, yLine);
+            ctx.lineTo(w, yLine);
+            ctx.stroke();
+          }
+
+          // 前方模拟障碍物目标立方体
+          const boxX = w / 2 - yawOffset * 0.8 + 45;
+          const boxY = vy + 35;
+          ctx.fillStyle = '#2563EB';
+          ctx.fillRect(boxX - 42, boxY - 30, 84, 72);
+          ctx.strokeStyle = '#93C5FD';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(boxX - 42, boxY - 30, 84, 72);
+
+          ctx.fillStyle = '#F8FAFC';
+          ctx.font = '12px JetBrains Mono, monospace';
+          ctx.textAlign = 'left';
+          ctx.fillText('Orbbec Astra Pro Plus [RGB 8-bit]', 14, h - 16);
+        } else if (topic === '/depth_cam/depth/image_raw') {
+          // 16UC1 深度伪彩可视化画面 (Jet Colormap)
+          const grad = ctx.createLinearGradient(0, 0, w, h);
+          grad.addColorStop(0, '#1E1B4B');
+          grad.addColorStop(0.35, '#1D4ED8');
+          grad.addColorStop(0.65, '#10B981');
+          grad.addColorStop(0.85, '#F59E0B');
+          grad.addColorStop(1, '#EF4444');
+          ctx.fillStyle = grad;
+          ctx.fillRect(0, 0, w, h);
+
+          // 深度等高环与中心测距值
+          const cx = w / 2 - yawOffset * 0.6;
+          const cy = h / 2;
+          ctx.fillStyle = 'rgba(239, 68, 68, 0.85)';
+          ctx.beginPath();
+          ctx.arc(cx + 35, cy + 10, 56, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = '#FFFFFF';
+          ctx.font = 'bold 13px JetBrains Mono, monospace';
+          ctx.textAlign = 'left';
+          ctx.fillText('16UC1 Depth (mm) | Center: 1420 mm | Scale: 1.0', 14, h - 16);
+        } else {
+          // /object_tracking/image_result 目标跟踪结果图
+          ctx.fillStyle = '#0F172A';
+          ctx.fillRect(0, 0, w, h);
+
+          const tx = w / 2 + Math.sin(state.camFrameTick * 0.04) * 90 - yawOffset * 0.5;
+          const ty = h / 2 + Math.cos(state.camFrameTick * 0.03) * 35;
+
+          ctx.fillStyle = '#EF4444';
+          ctx.beginPath();
+          ctx.arc(tx, ty, 38, 0, Math.PI * 2);
+          ctx.fill();
+
+          // 识别包围框
+          ctx.strokeStyle = '#22C55E';
+          ctx.lineWidth = 2.5;
+          ctx.strokeRect(tx - 48, ty - 48, 96, 96);
+          ctx.fillStyle = '#22C55E';
+          ctx.font = 'bold 12px JetBrains Mono, monospace';
+          ctx.textAlign = 'left';
+          ctx.fillText('TARGET_COLOR: RED | conf: 0.94 | dx: ' + Math.round(tx - w / 2) + 'px', tx - 48, ty - 56);
+          ctx.fillStyle = '#E2E8F0';
+          ctx.fillText('/object_tracking/image_result [Processed]', 14, h - 16);
+        }
+
+        // 十字准星叠加
+        if (state.showCrosshair) {
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(w / 2 - 24, h / 2);
+          ctx.lineTo(w / 2 + 24, h / 2);
+          ctx.moveTo(w / 2, h / 2 - 24);
+          ctx.lineTo(w / 2, h / 2 + 24);
+          ctx.stroke();
+          ctx.strokeRect(w / 2 - 6, h / 2 - 6, 12, 12);
+        }
+      }
+
+      // ==================== 5. YDLIDAR G4 激光射线仿真与 2D/3D 地图引擎 ====================
+      function computeSimulatedLaserScan() {
+        const lidarMod = state.launchModules.find(function (m) { return m.id === 'lidar'; });
+        if (!lidarMod || !lidarMod.running) {
+          state.scanPoints = [];
+          return;
+        }
+        const pts = [];
+        const rx = state.robotPose.x;
+        const ry = state.robotPose.y;
+        const ryaw = state.robotPose.yaw;
+        const numRays = 120;
+        const rangeMin = 0.12;
+        const rangeMax = 8.0;
+
+        for (let i = 0; i < numRays; i++) {
+          const angle = ryaw + (i / numRays) * Math.PI * 2;
+          const dx = Math.cos(angle);
+          const dy = Math.sin(angle);
+          let bestDist = rangeMax;
+
+          // 与障碍物矩形求交
+          for (let j = 0; j < state.obstacles.length; j++) {
+            const ob = state.obstacles[j];
+            const t1 = (ob.x - rx) / (dx || 1e-6);
+            const t2 = (ob.x + ob.w - rx) / (dx || 1e-6);
+            const t3 = (ob.y - ry) / (dy || 1e-6);
+            const t4 = (ob.y + ob.h - ry) / (dy || 1e-6);
+            const tmin = Math.max(Math.min(t1, t2), Math.min(t3, t4));
+            const tmax = Math.min(Math.max(t1, t2), Math.max(t3, t4));
+            if (tmax >= 0 && tmin <= tmax && tmin >= rangeMin && tmin < bestDist) {
+              bestDist = tmin;
+            }
+          }
+          if (bestDist < rangeMax) {
+            pts.push({
+              x: rx + Math.cos(angle) * bestDist,
+              y: ry + Math.sin(angle) * bestDist,
+            });
+          }
+        }
+        state.scanPoints = pts;
+      }
+
+      // 世界坐标 (m) <-> Canvas 像素坐标换算
+      function worldToCanvas(wx, wy, canvas) {
+        const cx = canvas.width / 2 + state.mapPan.x + wx * state.mapPan.zoom;
+        const cy = canvas.height / 2 + state.mapPan.y - wy * state.mapPan.zoom;
+        return { x: cx, y: cy };
+      }
+
+      function canvasToWorld(px, py, canvas) {
+        const wx = (px - canvas.width / 2 - state.mapPan.x) / state.mapPan.zoom;
+        const wy = -(py - canvas.height / 2 - state.mapPan.y) / state.mapPan.zoom;
+        return { x: wx, y: wy };
+      }
+
+      function renderMap2D() {
+        const canvas = document.getElementById('mapCanvas2D');
+        if (!canvas || state.mapViewMode !== '2d') return;
+        if (state.mode==='live') { liveMap.render(state.mapPan,state.layers,state.estopEngaged,{waypoints:[1,2,3].includes(state.navStatus.code) || state.navStatus.paused?state.activeNavigationPoints:state.waypoints,activeIndex:state.navStatus.currentWpIdx,initial:state.initialPoseDraft}); return; }
+        const rect = canvas.parentElement.getBoundingClientRect();
+        if (canvas.width !== Math.floor(rect.width) || canvas.height !== Math.floor(rect.height)) {
+          canvas.width = Math.max(320, Math.floor(rect.width));
+          canvas.height = Math.max(280, Math.floor(rect.height));
+        }
+
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width;
+        const h = canvas.height;
+        const zoom = state.mapPan.zoom;
+
+        // 1. 未知区域浅灰基底 (-1 unknown)
+        ctx.fillStyle = '#F1F5F9';
+        ctx.fillRect(0, 0, w, h);
+
+        if (state.mode === 'sim') {
+        // 2. 室内已知空闲栅格区域 (0 free space)
+        const roomTopLeft = worldToCanvas(-4.5, 3.5, canvas);
+        const roomBotRight = worldToCanvas(4.5, -3.5, canvas);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(
+          roomTopLeft.x,
+          roomTopLeft.y,
+          roomBotRight.x - roomTopLeft.x,
+          roomBotRight.y - roomTopLeft.y
+        );
+
+        }
+        // 3. 1米间隔世界坐标网格线
+        ctx.strokeStyle = '#E2E8F0';
+        ctx.lineWidth = 1;
+        for (let gx = -5; gx <= 5; gx++) {
+          const p1 = worldToCanvas(gx, -4, canvas);
+          const p2 = worldToCanvas(gx, 4, canvas);
+          ctx.beginPath();
+          ctx.moveTo(p1.x, p1.y);
+          ctx.lineTo(p2.x, p2.y);
+          ctx.stroke();
+        }
+        for (let gy = -4; gy <= 4; gy++) {
+          const p1 = worldToCanvas(-5, gy, canvas);
+          const p2 = worldToCanvas(5, gy, canvas);
+          ctx.beginPath();
+          ctx.moveTo(p1.x, p1.y);
+          ctx.lineTo(p2.x, p2.y);
+          ctx.stroke();
+        }
+
+        // 4. 局部代价地图膨胀层 (/local_costmap/costmap)
+        if (state.layers.costmap) {
+          ctx.fillStyle = 'rgba(59, 130, 246, 0.12)';
+          state.obstacles.forEach(function (ob) {
+            const p = worldToCanvas(ob.x - 0.18, ob.y + ob.h + 0.18, canvas);
+            ctx.fillRect(p.x, p.y, (ob.w + 0.36) * zoom, (ob.h + 0.36) * zoom);
+          });
+        }
+
+        // 5. 占据栅格障碍物 (100 occupied)
+        ctx.fillStyle = '#1E293B';
+        state.obstacles.forEach(function (ob) {
+          const p = worldToCanvas(ob.x, ob.y + ob.h, canvas);
+          ctx.fillRect(p.x, p.y, ob.w * zoom, ob.h * zoom);
+        });
+
+        // 6. 世界坐标原点轴 (map frame)
+        const origin = worldToCanvas(0, 0, canvas);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#EF4444';
+        ctx.beginPath();
+        ctx.moveTo(origin.x, origin.y);
+        ctx.lineTo(origin.x + 24, origin.y);
+        ctx.stroke();
+        ctx.strokeStyle = '#10B981';
+        ctx.beginPath();
+        ctx.moveTo(origin.x, origin.y);
+        ctx.lineTo(origin.x, origin.y - 24);
+        ctx.stroke();
+
+        // 7. 全局规划路径 (/plan)
+        if (state.layers.plan && state.navStatus.activePath.length > 1) {
+          ctx.strokeStyle = '#10B981';
+          ctx.lineWidth = 3;
+          ctx.setLineDash([6, 4]);
+          ctx.beginPath();
+          state.navStatus.activePath.forEach(function (pt, idx) {
+            const cp = worldToCanvas(pt.x, pt.y, canvas);
+            if (idx === 0) ctx.moveTo(cp.x, cp.y);
+            else ctx.lineTo(cp.x, cp.y);
+          });
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        // 8. 编排站点标记 (Waypoints)
+        if (state.layers.waypoints) {
+          state.waypoints.forEach(function (wp, index) {
+            const wpCanvas = worldToCanvas(wp.x, wp.y, canvas);
+            const yawRad = degToRad(wp.yawDeg);
+            const isCurrentTarget = (state.navStatus.code === 2 && state.navStatus.currentWpIdx === index);
+
+            // 朝向箭头
+            ctx.strokeStyle = isCurrentTarget ? '#F59E0B' : '#2563EB';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(wpCanvas.x, wpCanvas.y);
+            ctx.lineTo(
+              wpCanvas.x + Math.cos(yawRad) * 18,
+              wpCanvas.y - Math.sin(yawRad) * 18
+            );
+            ctx.stroke();
+
+            // 站点圆点
+            ctx.fillStyle = isCurrentTarget ? '#F59E0B' : '#2563EB';
+            ctx.beginPath();
+            ctx.arc(wpCanvas.x, wpCanvas.y, 8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = 'bold 10px Inter, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(String(index + 1), wpCanvas.x, wpCanvas.y);
+
+            // 站点名称标签
+            ctx.fillStyle = '#0F172A';
+            ctx.font = '11px Inter, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText(wp.name, wpCanvas.x + 11, wpCanvas.y - 6);
+          });
+        }
+
+        // 9. YDLIDAR G4 激光扫描点云 (/scan)
+        if (state.layers.scan) {
+          ctx.fillStyle = '#EF4444';
+          state.scanPoints.forEach(function (sp) {
+            const p = worldToCanvas(sp.x, sp.y, canvas);
+            ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+          });
+        }
+
+        // 10. JetAuto Pro 机器人本体与朝向视锥
+        const robPos = worldToCanvas(state.robotPose.x, state.robotPose.y, canvas);
+        ctx.save();
+        ctx.translate(robPos.x, robPos.y);
+        ctx.rotate(-state.robotPose.yaw);
+
+        // 视锥扇形
+        ctx.fillStyle = 'rgba(37, 99, 235, 0.14)';
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, 34, -0.45, 0.45);
+        ctx.closePath();
+        ctx.fill();
+
+        // 麦轮车体矩形
+        ctx.fillStyle = state.estopEngaged ? '#DC2626' : '#2563EB';
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.roundRect(-13, -10, 26, 20, 4);
+        ctx.fill();
+        ctx.stroke();
+
+        // 车头指示三角
+        ctx.fillStyle = '#FFFFFF';
+        ctx.beginPath();
+        ctx.moveTo(10, 0);
+        ctx.lineTo(3, -5);
+        ctx.lineTo(3, 5);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+
+        // 11. 鼠标拖拽交互矢量预览 (/initialpose, /navigate_to_pose, 拾取站点)
+        if (state.dragState.active && state.mapTool !== 'pan') {
+          const sPt = worldToCanvas(state.dragState.worldStartX, state.dragState.worldStartY, canvas);
+          const ePt = worldToCanvas(state.dragState.worldCurrX, state.dragState.worldCurrY, canvas);
+          ctx.strokeStyle = state.mapTool === 'initialpose' ? '#F59E0B' : '#10B981';
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.moveTo(sPt.x, sPt.y);
+          ctx.lineTo(ePt.x, ePt.y);
+          ctx.stroke();
+
+          ctx.fillStyle = state.mapTool === 'initialpose' ? '#F59E0B' : '#10B981';
+          ctx.beginPath();
+          ctx.arc(sPt.x, sPt.y, 6, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      // ==================== 6. Three.js 3D 空间态势视图 ====================
+      let threeCtx = null;
+      function initThreeView() {
+        const container = document.getElementById('mapContainer3D');
+        if (!container || threeCtx || typeof THREE === 'undefined') return;
+        const w = container.clientWidth || 600;
+        const h = container.clientHeight || 400;
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xf8fafc);
+
+        const camera = new THREE.PerspectiveCamera(50, w / h, 0.1, 100);
+        camera.position.set(0, -6.5, 5.2);
+        camera.up.set(0, 0, 1);
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(w, h);
+        container.innerHTML = '';
+        container.appendChild(renderer.domElement);
+
+        // 灯光与地面网格
+        const ambient = new THREE.AmbientLight(0xffffff, 0.85);
+        scene.add(ambient);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.55);
+        dirLight.position.set(5, -5, 10);
+        scene.add(dirLight);
+
+        const grid = new THREE.GridHelper(10, 20, 0x94a3b8, 0xe2e8f0);
+        grid.rotation.x = Math.PI / 2;
+        scene.add(grid);
+
+        // 障碍物立体墙与实验台
+        const wallMat = new THREE.MeshLambertMaterial({ color: 0xcbd5e1 });
+        state.obstacles.forEach(function (ob) {
+          const geom = new THREE.BoxGeometry(ob.w, ob.h, 0.45);
+          const mesh = new THREE.Mesh(geom, wallMat);
+          mesh.position.set(ob.x + ob.w / 2, ob.y + ob.h / 2, 0.225);
+          scene.add(mesh);
+        });
+
+        // 机器人 3D 底盘模型
+        const robotGroup = new THREE.Group();
+        const bodyMat = new THREE.MeshLambertMaterial({ color: 0x2563eb });
+        const bodyMesh = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.32, 0.18), bodyMat);
+        bodyMesh.position.z = 0.12;
+        robotGroup.add(bodyMesh);
+
+        const lidarMesh = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.06, 0.06, 0.08, 16),
+          new THREE.MeshLambertMaterial({ color: 0x0f172a })
+        );
+        lidarMesh.rotation.x = Math.PI / 2;
+        lidarMesh.position.set(0.08, 0, 0.25);
+        robotGroup.add(lidarMesh);
+        scene.add(robotGroup);
+
+        // 激光点云 Points
+        const scanGeom = new THREE.BufferGeometry();
+        const scanMat = new THREE.PointsMaterial({ color: 0xef4444, size: 0.08 });
+        const scanCloud = new THREE.Points(scanGeom, scanMat);
+        scene.add(scanCloud);
+
+        threeCtx = { scene, camera, renderer, robotGroup, bodyMat, scanGeom, scanCloud, container };
+      }
+
+      function renderMap3D() {
+        if (state.mapViewMode !== '3d') return;
+        if (!threeCtx) initThreeView();
+        if (!threeCtx) return;
+
+        const { scene, camera, renderer, robotGroup, bodyMat, scanGeom, scanCloud, container } = threeCtx;
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        if (w > 0 && h > 0 && (renderer.domElement.width !== w || renderer.domElement.height !== h)) {
+          renderer.setSize(w, h);
+          camera.aspect = w / h;
+          camera.updateProjectionMatrix();
+        }
+
+        robotGroup.position.set(state.robotPose.x, state.robotPose.y, 0);
+        robotGroup.rotation.z = state.robotPose.yaw;
+        bodyMat.color.setHex(state.estopEngaged ? 0xdc2626 : 0x2563eb);
+
+        scanCloud.visible = state.layers.scan;
+        if (state.layers.scan && state.scanPoints.length > 0) {
+          const positions = new Float32Array(state.scanPoints.length * 3);
+          for (let i = 0; i < state.scanPoints.length; i++) {
+            positions[i * 3] = state.scanPoints[i].x;
+            positions[i * 3 + 1] = state.scanPoints[i].y;
+            positions[i * 3 + 2] = 0.24;
+          }
+          scanGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        }
+
+        // 相机轻微跟随机器人
+        camera.position.x = state.robotPose.x * 0.4;
+        camera.position.y = state.robotPose.y * 0.4 - 6.2;
+        camera.lookAt(state.robotPose.x * 0.5, state.robotPose.y * 0.5, 0);
+
+        renderer.render(scene, camera);
+      }
+
+      // ==================== 7. 麦轮摇杆控制与 /cmd_vel 发布 + 软急停 ====================
+      function publishCmdVel(lx, ly, az) {
+        if (state.estopEngaged) {
+          lx = 0; ly = 0; az = 0;
+        }
+        // 严格按照 /cmd_vel 限速范围截断
+        const maxLin = 0.20 * state.speedScale;
+        const maxAng = 0.50 * state.speedScale;
+        const clampedLx = Math.max(-maxLin, Math.min(maxLin, lx));
+        const clampedLy = Math.max(-maxLin, Math.min(maxLin, ly));
+        const clampedAz = Math.max(-maxAng, Math.min(maxAng, az));
+
+        state.cmdVel.lx = clampedLx;
+        state.cmdVel.ly = clampedLy;
+        state.cmdVel.az = clampedAz;
+        state.lastCmdTimestamp = Date.now();
+
+        document.getElementById('valCmdLinX').textContent = clampedLx.toFixed(2) + ' m/s';
+        document.getElementById('valCmdLinY').textContent = clampedLy.toFixed(2) + ' m/s';
+        document.getElementById('valCmdAngZ').textContent = clampedAz.toFixed(2) + ' rad/s';
+
+        if (state.mode === 'live') {
+          try { transport.velocity(clampedLx, clampedLy, clampedAz); }
+          catch (err) { resetLocalCommand(); reportError(err.message); }
+        }
+      }
+
+      async function engageSoftEstop(engage) {
+        if (state.mode === 'sim') { engageSimEstop(engage); return; }
+        resetLocalCommand(); transport.zero();
+        if (engage) { state.estopEngaged = true; renderEstop(); }
+        try {
+          const result = await transport.api('/api/estop?engage=' + engage, {});
+          state.estopEngaged = result.estop_engaged;
+          renderEstop();
+          showToast(engage ? '网关已锁定手动与导航控制，并请求取消导航' : '网关已确认解除急停；请重新操作控制器', 'info');
+        } catch (err) { reportError('急停请求未确认：' + err.message); }
+      }
+
+      function engageSimEstop(engage) {
+        state.estopEngaged = engage;
+        const banner = document.getElementById('estopStatusBanner');
+        const btnEstop = document.getElementById('btnSoftEstop');
+        const btnRelease = document.getElementById('btnReleaseEstop');
+
+        if (engage) {
+          banner.classList.remove('hidden');
+          banner.classList.add('flex');
+          btnRelease.classList.remove('hidden');
+          btnRelease.classList.add('flex');
+          btnEstop.classList.add('ring-4', 'ring-red-300');
+
+          // 1. 立即切断摇杆并连续发送全零 Twist 到 /cmd_vel
+          publishCmdVel(0, 0, 0);
+          resetJoystickUI();
+
+          // 2. 立即取消任何活跃的 Nav2 导航任务
+          if (state.navStatus.code === 1 || state.navStatus.code === 2) {
+            state.navStatus.code = 5;
+            state.navStatus.text = '5: CANCELED (急停中止)';
+            state.navStatus.activePath = [];
+            state.navStatus.paused = false;
+            updateNavUI();
+          }
+
+          appendLog('E-STOP', '软急停触发！已向 /cmd_vel 连发零速、取消 Nav2 Goal 并请求退出外部玩法');
+          showToast('已触发软急停！所有运动与导航目标已中止并锁定', 'danger');
+        } else {
+          banner.classList.add('hidden');
+          banner.classList.remove('flex');
+          btnRelease.classList.add('hidden');
+          btnRelease.classList.remove('flex');
+          btnEstop.classList.remove('ring-4', 'ring-red-300');
+          appendLog('E-STOP', '软急停锁已手动解除，恢复 /cmd_vel 与 Nav2 调度权限');
+          showToast('软急停锁已解除，可正常控制底盘', 'success');
+        }
+      }
+
+      function resetJoystickUI() {
+        const knob = document.getElementById('joystickKnob');
+        if (knob) {
+          knob.style.transform = 'translate(0px, 0px)';
+          knob.textContent = 'IDLE';
+        }
+      }
+
+      // ==================== 8. Nav2 站点导航任务编排逻辑 ====================
+      function renderWaypointsList() {
+        const container = document.getElementById('waypointListContainer');
+        if (!container) return;
+        container.innerHTML = '';
+
+        state.waypoints.forEach(function (wp, index) {
+          const isCurrent = (state.navStatus.code === 2 && state.navStatus.currentWpIdx === index);
+          const item = document.createElement('div');
+          item.className = 'flex items-center justify-between gap-2 p-2 rounded-lg border transition-colors ' +
+            (isCurrent ? 'bg-blue-50/80 border-blue-300' : 'bg-slate-50/70 border-slate-200 hover:bg-slate-50');
+
+          item.innerHTML =
+            '<div class="flex items-center gap-2 min-w-0">' +
+              '<span class="w-5 h-5 rounded-full text-[11px] font-bold flex items-center justify-center shrink-0 ' +
+                (isCurrent ? 'bg-amber-500 text-white' : 'bg-blue-600 text-white') + '">' + (index + 1) + '</span>' +
+              '<div class="min-w-0">' +
+                '<div class="text-xs font-semibold text-slate-800 truncate">' + wp.name + '</div>' +
+                '<div class="text-[10px] font-mono-code text-slate-500">' +
+                  'X:' + wp.x.toFixed(2) + 'm · Y:' + wp.y.toFixed(2) + 'm · Yaw:' + wp.yawDeg + '° · 驻留:' + wp.dwellSec + 's' +
+                '</div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="flex items-center gap-1 shrink-0">' +
+              '<button type="button" data-act="goto" data-idx="' + index + '" class="px-2 py-0.5 text-[11px] font-medium rounded bg-blue-600 hover:bg-blue-700 text-white" title="单点直达此站点">前往</button>' +
+              '<button type="button" data-act="up" data-idx="' + index + '" class="px-1.5 py-0.5 text-[11px] rounded bg-white border border-slate-200 text-slate-600 hover:bg-slate-100" title="上移">↑</button>' +
+              '<button type="button" data-act="del" data-idx="' + index + '" class="px-1.5 py-0.5 text-[11px] rounded bg-white border border-slate-200 text-red-600 hover:bg-red-50" title="删除">✕</button>' +
+            '</div>';
+
+          container.appendChild(item);
+        });
+
+        // 绑定站点内按钮事件
+        container.querySelectorAll('button[data-act]').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            const act = btn.getAttribute('data-act');
+            const idx = parseInt(btn.getAttribute('data-idx'), 10);
+            if (act === 'goto') {
+              startNavigationTask('single', idx);
+            } else if (act === 'up' && idx > 0) {
+              const tmp = state.waypoints[idx - 1];
+              state.waypoints[idx - 1] = state.waypoints[idx];
+              state.waypoints[idx] = tmp;
+              renderWaypointsList();
+            } else if (act === 'del') {
+              state.waypoints.splice(idx, 1);
+              renderWaypointsList();
+              updateNavUI();
+            }
+          });
+        });
+
+        updateNavUI();
+      }
+
+      function updateNavUI() {
+        const badge = document.getElementById('navGoalStatusBadge');
+        badge.textContent = state.navStatus.text;
+        const colorByCode = {
+          0: 'bg-slate-100 text-slate-700 border-slate-200',
+          1: 'bg-blue-50 text-blue-700 border-blue-200',
+          2: 'bg-blue-600 text-white border-blue-600',
+          4: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+          5: 'bg-amber-50 text-amber-700 border-amber-200',
+          6: 'bg-red-50 text-red-700 border-red-200',
+        };
+        badge.className = 'px-2 py-0.5 text-[11px] font-mono-code font-semibold rounded border ' + (colorByCode[state.navStatus.code] || colorByCode[0]);
+
+        const total = state.mode==='live' && state.activeNavigationPoints.length?state.activeNavigationPoints.length:state.waypoints.length;
+        const cur = total > 0 ? Math.min(state.navStatus.currentWpIdx + 1, total) : 0;
+        document.getElementById('valNavWpProgress').textContent = cur + ' / ' + total;
+        document.getElementById('valNavDistRem').textContent = state.navStatus.distRemaining.toFixed(2) + ' m';
+        document.getElementById('valNavTimeRem').textContent = state.navStatus.timeRemaining.toFixed(1) + ' s';
+        document.getElementById('valNavRecoveries').textContent =
+          state.navStatus.recoveries + ' / ' + state.navStatus.missedWaypoints.length;
+        document.getElementById('valMissedWaypointsNote').textContent =
+          'missed_waypoints: [' + state.navStatus.missedWaypoints.join(', ') + ']';
+      }
+
+      function startNavigationTask(overrideMode, startIdx) {
+        if (state.mode === 'live') {startLiveNavigation(overrideMode || document.getElementById('selectNavActionMode').value,startIdx);return;}
+        if (state.estopEngaged) {
+          showToast('当前处于软急停锁定状态，请先解除急停锁！', 'danger');
+          return;
+        }
+        const navMod = state.launchModules.find(function (m) { return m.id === 'navigation'; });
+        if (!navMod || !navMod.running) {
+          showToast('请先在中间栏启动【Nav2 自主导航】模块！', 'warn');
+          return;
+        }
+        if (state.waypoints.length === 0) {
+          showToast('站点列表为空，请先添加导航站点', 'warn');
+          return;
+        }
+
+        const mode = overrideMode || document.getElementById('selectNavActionMode').value;
+        const loops = parseInt(document.getElementById('inputNavLoops').value, 10) || 1;
+        state.navMode = mode;
+        state.navLoops = loops;
+        state.navStatus.currentWpIdx = typeof startIdx === 'number' ? startIdx : 0;
+        state.navStatus.currentLoop = 1;
+        state.navStatus.code = 2; // EXECUTING
+        state.navStatus.text = '2: EXECUTING (导航中)';
+        state.navStatus.paused = false;
+        state.navStatus.missedWaypoints = [];
+        state.navStatus.dwellTimer = 0;
+
+        rebuildActivePlanPath();
+        renderWaypointsList();
+
+        const targetWp = state.waypoints[state.navStatus.currentWpIdx];
+        const actionMap = {
+          single: '/navigate_to_pose',
+          through_poses: '/navigate_through_poses',
+          waypoints: '/follow_waypoints',
+        };
+        appendLog('NAV2', '下发 Action [' + actionMap[mode] + '] → 目标站点 #' + (state.navStatus.currentWpIdx + 1) + ' (' + targetWp.name + ')');
+        showToast('已启动 Nav2 导航任务：前往 ' + targetWp.name, 'info');
+      }
+
+      function rebuildActivePlanPath() {
+        const path = [{ x: state.robotPose.x, y: state.robotPose.y }];
+        if (state.navMode === 'single') {
+          const wp = state.waypoints[state.navStatus.currentWpIdx];
+          if (wp) path.push({ x: wp.x, y: wp.y });
+        } else {
+          for (let i = state.navStatus.currentWpIdx; i < state.waypoints.length; i++) {
+            path.push({ x: state.waypoints[i].x, y: state.waypoints[i].y });
+          }
+        }
+        state.navStatus.activePath = path;
+      }
+
+      // ==================== 9. ROS 2 Launch 模块在线启停管理 ====================
+      function renderLaunchModules() {
+        const grid = document.getElementById('launchModulesGrid');
+        if (!grid) return;
+        function text(el, value) {
+          if (el.textContent !== String(value)) el.textContent = value;
+        }
+        const cards = new Map(Array.from(grid.children).map(function (el) { return [el.dataset.moduleId, el]; }));
+        state.launchModules.forEach(function (mod) {
+          let card = cards.get(mod.id);
+          if (!card) {
+            card = document.createElement('div');
+            card.dataset.moduleId = mod.id;
+            // Keep the same button DOM across telemetry updates, including while pressed.
+            card.innerHTML = '<div class="flex items-start justify-between gap-2"><div>' +
+              '<div data-module-name class="text-xs font-bold text-slate-800"></div>' +
+              '<div data-module-cmd class="mt-0.5 text-[10px] font-mono-code text-slate-500 break-all"></div>' +
+              '</div><span data-module-status class="text-[10px] font-mono-code shrink-0"></span></div>' +
+              '<div class="flex items-center justify-between pt-1.5 border-t border-slate-100">' +
+              '<span data-module-badge class="text-[10px] text-slate-400"></span>' +
+              '<button type="button" data-launch-act="toggle"></button></div>';
+            const button = card.querySelector('button');
+            button.dataset.launchId = mod.id;
+            button.addEventListener('click', function () { toggleLaunchModule(mod.id); });
+            grid.appendChild(card);
+          }
+          cards.delete(mod.id);
+          const pending = pendingLaunches.has(mod.id);
+          const unknown = state.mode === 'live' && !mod.known;
+          card.className = 'p-2.5 rounded-lg border flex flex-col justify-between gap-2 ' +
+            (mod.running && !unknown ? 'bg-white border-emerald-200' : 'bg-slate-50 border-slate-200');
+          text(card.querySelector('[data-module-name]'), mod.name);
+          text(card.querySelector('[data-module-cmd]'), mod.cmd);
+          text(card.querySelector('[data-module-status]'), unknown ? '状态未知' :
+            (pending ? '请求处理中…' : (mod.running ? 'PID ' + mod.pid : '已停止')));
+          text(card.querySelector('[data-module-badge]'), unknown ? '等待网关模块状态' : mod.badge);
+          const button = card.querySelector('button');
+          const disabled = state.mode === 'live' && (unknown || !state.agentConnected || mod.external || pending);
+          if (button.disabled !== disabled) button.disabled = disabled;
+          text(button, pending ? '处理中…' : (mod.running ? '停止模块' : '启动模块'));
+          button.title = mod.external ? '请在原启动终端处理外部进程' : (unknown ? '未收到网关模块状态' : '');
+          button.className = 'px-2.5 py-1 text-xs font-semibold rounded border ' +
+            (mod.running ? 'bg-red-50 text-red-600 border-red-200' : 'bg-blue-600 text-white');
+        });
+        cards.forEach(function (el) { el.remove(); });
+      }
+
+      const pendingLaunches = new Set();
+      async function toggleLaunchModule(modId) {
+        if (state.mode === 'sim') { toggleSimLaunchModule(modId); return; }
+        const mod = state.launchModules.find(function (m) { return m.id === modId; });
+        if (!mod || pendingLaunches.has(modId)) return;
+        if (!state.agentConnected || !mod.known) { reportError('尚未获得真实模块状态'); return; }
+        if (mod.external) { reportError('外部进程请在原启动终端处理'); return; }
+        pendingLaunches.add(modId); renderLaunchModules();
+        try {
+          const data = await transport.api('/api/launches', { module_id: modId,
+            action: mod.running ? 'stop' : 'start', map_path: document.getElementById('inputNavMapPath').value.trim() }, 12000);
+          appendLog('LAUNCH', mod.name + '：' + data.status + (data.pid ? ' PID=' + data.pid : ''));
+          applyLaunches((await transport.api('/api/launches')).modules);
+          if (modId === 'depth_camera' || modId === 'web_video_server') refreshCameraStreamSource();
+        } catch (err) { reportError(err.message); }
+        finally { pendingLaunches.delete(modId); renderLaunchModules(); }
+      }
+
+      function toggleSimLaunchModule(modId) {
+        const mod = state.launchModules.find(function (m) { return m.id === modId; });
+        if (!mod) return;
+
+        if (!mod.running) {
+          // 启动前检查互斥模块 (如 slam 与 navigation 互斥)
+          for (let i = 0; i < mod.conflictsWith.length; i++) {
+            const cId = mod.conflictsWith[i];
+            const conflictMod = state.launchModules.find(function (m) { return m.id === cId && m.running; });
+            if (conflictMod) {
+              showToast('互斥保护拦截：请先停止【' + conflictMod.name + '】后再启动【' + escapeHtml(mod.name) + '】', 'danger');
+              appendLog('GUARD', '拦截冲突启动：' + mod.id + ' 与正在运行的 ' + conflictMod.id + ' 存在 TF (map→odom) 冲突');
+              return;
+            }
+          }
+          mod.running = true;
+          mod.pid = Math.floor(5000 + Math.random() * 3900);
+          let cmdShown = mod.cmd;
+          if (mod.id === 'navigation') {
+            const customMap = document.getElementById('inputNavMapPath').value.trim();
+            cmdShown = mod.cmd + ' map:=' + customMap;
+          }
+          appendLog('LAUNCH', '已拉起进程组 [PID ' + mod.pid + ']: ' + cmdShown);
+          showToast('已启动模块：' + mod.name, 'success');
+        } else {
+          appendLog('LAUNCH', '发送 SIGINT 停止进程组 [PID ' + mod.pid + ']: ' + mod.name);
+          mod.running = false;
+          mod.pid = null;
+          showToast('已停止模块：' + mod.name, 'info');
+        }
+
+        renderLaunchModules();
+        refreshCameraStreamSource();
+      }
+
+      // ==================== 10. 主循环 (20Hz 运动学、Nav2 状态机、遥测刷新) ====================
+      function simulationTick() {
+        if (state.mode === 'live') {
+          if (!state.videoOnline && Date.now() - state.videoAttemptTs > 10000) refreshCameraStreamSource();
+          liveMap.tick();
+          const pose=liveMap.validPose();
+          document.getElementById('hudPoseX').textContent=pose?pose.x.toFixed(2):'--';
+          document.getElementById('hudPoseY').textContent=pose?pose.y.toFixed(2):'--';
+          document.getElementById('hudPoseYaw').textContent=pose?radToDeg(pose.yaw).toFixed(1)+'°':'--';
+          renderMap2D();
+          return;
+        }
+        const dt = 0.05; // 50ms (20Hz)
+
+        // 1. 500ms 摇杆速度看门狗检查
+        const now = Date.now();
+        if (!state.estopEngaged) {
+          // 底盘模块运行中才积分运动
+          const chassisMod = state.launchModules.find(function (m) { return m.id === 'controller'; });
+          if (chassisMod && chassisMod.running) {
+            if (Math.abs(state.cmdVel.lx) > 1e-4 || Math.abs(state.cmdVel.ly) > 1e-4 || Math.abs(state.cmdVel.az) > 1e-4) {
+              const cosY = Math.cos(state.robotPose.yaw);
+              const sinY = Math.sin(state.robotPose.yaw);
+              const vxWorld = state.cmdVel.lx * cosY - state.cmdVel.ly * sinY;
+              const vyWorld = state.cmdVel.lx * sinY + state.cmdVel.ly * cosY;
+              state.robotPose.x = Math.max(-4.1, Math.min(4.1, state.robotPose.x + vxWorld * dt));
+              state.robotPose.y = Math.max(-3.1, Math.min(3.1, state.robotPose.y + vyWorld * dt));
+              state.robotPose.yaw = normalizeAngle(state.robotPose.yaw + state.cmdVel.az * dt);
+            }
+          }
+        }
+
+        // 2. Nav2 导航状态机推进
+        if (state.navStatus.code === 2 && !state.navStatus.paused && !state.estopEngaged) {
+          const targetWp = state.waypoints[state.navStatus.currentWpIdx];
+          if (targetWp) {
+            const dx = targetWp.x - state.robotPose.x;
+            const dy = targetWp.y - state.robotPose.y;
+            const dist = Math.hypot(dx, dy);
+            state.navStatus.distRemaining = dist;
+            state.navStatus.timeRemaining = dist / 0.18;
+
+            if (dist > 0.08) {
+              const targetAngle = Math.atan2(dy, dx);
+              const angleDiff = normalizeAngle(targetAngle - state.robotPose.yaw);
+              state.robotPose.yaw = normalizeAngle(state.robotPose.yaw + Math.sign(angleDiff) * Math.min(Math.abs(angleDiff), 0.08));
+              const step = Math.min(dist, 0.18 * dt);
+              state.robotPose.x += Math.cos(targetAngle) * step;
+              state.robotPose.y += Math.sin(targetAngle) * step;
+              state.navStatus.activePath[0] = { x: state.robotPose.x, y: state.robotPose.y };
+            } else {
+              // 到达站点朝向对齐与驻留
+              state.robotPose.x = targetWp.x;
+              state.robotPose.y = targetWp.y;
+              state.robotPose.yaw = degToRad(targetWp.yawDeg);
+              state.navStatus.distRemaining = 0;
+              state.navStatus.timeRemaining = 0;
+
+              if (state.navMode === 'single') {
+                state.navStatus.code = 4;
+                state.navStatus.text = '4: SUCCEEDED (已到达)';
+                state.navStatus.activePath = [];
+                appendLog('NAV2', '单点导航完成 (GoalStatus=4 SUCCEEDED)：已到达 ' + targetWp.name);
+                showToast('导航完成：已到达 ' + targetWp.name, 'success');
+                renderWaypointsList();
+              } else {
+                // 多点或航点巡检模式
+                state.navStatus.dwellTimer += dt;
+                if (state.navStatus.dwellTimer >= (targetWp.dwellSec || 0.5)) {
+                  state.navStatus.dwellTimer = 0;
+                  if (state.navStatus.currentWpIdx + 1 < state.waypoints.length) {
+                    state.navStatus.currentWpIdx += 1;
+                    rebuildActivePlanPath();
+                    renderWaypointsList();
+                    appendLog('NAV2', '前往下一站点 #' + (state.navStatus.currentWpIdx + 1) + ': ' + state.waypoints[state.navStatus.currentWpIdx].name);
+                  } else if (state.navStatus.currentLoop < state.navLoops) {
+                    state.navStatus.currentLoop += 1;
+                    state.navStatus.currentWpIdx = 0;
+                    rebuildActivePlanPath();
+                    renderWaypointsList();
+                    appendLog('NAV2', '开始第 ' + state.navStatus.currentLoop + ' / ' + state.navLoops + ' 轮循环巡航');
+                  } else {
+                    state.navStatus.code = 4;
+                    state.navStatus.text = '4: SUCCEEDED (巡检完成)';
+                    state.navStatus.activePath = [];
+                    appendLog('NAV2', '全部站点巡航完成 (GoalStatus=4 SUCCEEDED, missed_waypoints=[])');
+                    showToast('全部 Nav2 航点任务执行完毕！', 'success');
+                    renderWaypointsList();
+                  }
+                }
+              }
+            }
+            updateNavUI();
+          }
+        }
+
+        // 3. 更新 HUD 位姿与激光雷达点云
+        document.getElementById('hudPoseX').textContent = state.robotPose.x.toFixed(2);
+        document.getElementById('hudPoseY').textContent = state.robotPose.y.toFixed(2);
+        document.getElementById('hudPoseYaw').textContent = radToDeg(state.robotPose.yaw).toFixed(1) + '°';
+
+        computeSimulatedLaserScan();
+        renderMap2D();
+        renderMap3D();
+        renderCameraCanvas();
+      }
+
+      // 1Hz 硬件状态看板刷新
+      function telemetrySecondTick() {
+        const now = new Date();
+        document.getElementById('valSystemClock').textContent = now.toTimeString().split(' ')[0];
+
+        if (state.mode === 'sim') {
+          state.hw.cpuPercent = +(22 + Math.sin(Date.now() / 2000) * 6).toFixed(1);
+          state.hw.gpuPercent = +(16 + Math.cos(Date.now() / 1800) * 5).toFixed(1);
+          state.hw.cpuTempC = +(47.5 + Math.sin(Date.now() / 4000) * 1.4).toFixed(1);
+          state.hw.gpuTempC = +(45.5 + Math.cos(Date.now() / 4000) * 1.2).toFixed(1);
+          if (state.batteryHasSample) {
+            state.batteryMv = Math.max(10200, state.batteryMv - (Math.random() > 0.7 ? 1 : 0));
+            state.batteryLastTs = Date.now();
+          }
+        }
+
+        if (state.mode === 'live' && Date.now() - state.telemetryTs > 3000) {
+          Object.keys(state.hw).forEach(function (k) { state.hw[k] = NaN; });
+          state.batteryHasSample = false;
+        }
+        function metric(v, digits, suffix) { return Number.isFinite(v) ? v.toFixed(digits) + suffix : '--'; }
+        document.getElementById('valRamDetail').textContent = metric(state.hw.ramUsedGb, 1, '') + ' / ' + metric(state.hw.ramTotalGb, 1, ' GB');
+        document.getElementById('valDiskDetail').textContent = metric(state.hw.diskUsedGb, 1, '') + ' / ' + metric(state.hw.diskTotalGb, 1, ' GB');
+        document.getElementById('valRamUsage').textContent = metric(state.hw.ramPercent, 1, '%');
+        document.getElementById('valDiskUsage').textContent = metric(state.hw.diskPercent, 1, '%');
+        document.getElementById('barRamUsage').style.width = (Number.isFinite(state.hw.ramPercent) ? state.hw.ramPercent : 0) + '%';
+        document.getElementById('barDiskUsage').style.width = (Number.isFinite(state.hw.diskPercent) ? state.hw.diskPercent : 0) + '%';
+        // 渲染 CPU/GPU/RAM
+        document.getElementById('valCpuUsage').textContent = metric(state.hw.cpuPercent, 1, '%');
+        document.getElementById('barCpuUsage').style.width = (Number.isFinite(state.hw.cpuPercent) ? Math.min(100, state.hw.cpuPercent) : 0) + '%';
+        document.getElementById('valCpuTemp').textContent = metric(state.hw.cpuTempC, 1, '°C');
+
+        document.getElementById('valGpuUsage').textContent = metric(state.hw.gpuPercent, 1, '%');
+        document.getElementById('barGpuUsage').style.width = (Number.isFinite(state.hw.gpuPercent) ? Math.min(100, state.hw.gpuPercent) : 0) + '%';
+        document.getElementById('valGpuTemp').textContent = metric(state.hw.gpuTempC, 1, '°C');
+
+        // 渲染电池电压与无样本核验状态
+        const voltEl = document.getElementById('valBatteryVolt');
+        const mvEl = document.getElementById('valBatteryMv');
+        const ageEl = document.getElementById('valBatteryAge');
+        const badgeEl = document.getElementById('batteryStatusBadge');
+        const barEl = document.getElementById('barBatteryVolt');
+        const warnV = parseFloat(document.getElementById('inputLowVoltWarn').value) || 10.6;
+
+        if (!state.batteryHasSample) {
+          voltEl.textContent = '--.-- V';
+          mvEl.textContent = '(等待样本)';
+          ageEl.textContent = '暂无样本';
+          badgeEl.textContent = '等待底盘采样';
+          badgeEl.className = 'px-1.5 py-0.5 text-[10px] font-semibold rounded bg-amber-50 text-amber-700 border border-amber-200';
+          barEl.style.width = '0%';
+        } else {
+          const v = state.batteryMv / 1000.0;
+          const ageSec = ((Date.now() - state.batteryLastTs) / 1000).toFixed(1);
+          voltEl.textContent = v.toFixed(2) + ' V';
+          mvEl.textContent = '(' + state.batteryMv + ' mV)';
+          ageEl.textContent = '采样: ' + ageSec + 's 前';
+          const pct = Math.max(5, Math.min(100, Math.round(((v - 9.6) / (12.6 - 9.6)) * 100)));
+          barEl.style.width = pct + '%';
+
+          if (v <= warnV) {
+            badgeEl.textContent = '低压告警';
+            badgeEl.className = 'px-1.5 py-0.5 text-[10px] font-semibold rounded bg-red-50 text-red-700 border border-red-200';
+            barEl.className = 'bg-red-600 h-full transition-all duration-300';
+          } else {
+            badgeEl.textContent = '正常供电';
+            badgeEl.className = 'px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-50 text-emerald-700 border border-emerald-200';
+            barEl.className = 'bg-emerald-500 h-full transition-all duration-300';
+          }
+        }
+      }
+
+      // ==================== 11. 绑定所有 UI 控件事件 ====================
+      function bindEvents() {
+        document.getElementById('btnAutoLocalize').addEventListener('click',()=>automaticLocalization('auto'));
+        document.getElementById('btnCancelAutoLocalize').addEventListener('click',()=>automaticLocalization('cancel'));
+        document.getElementById('btnConfirmInitialPose').addEventListener('click',confirmInitialPose);
+        document.getElementById('btnLoadSavedMap').addEventListener('click',function(){controlSavedMap(true);});
+        document.getElementById('btnUnloadSavedMap').addEventListener('click',function(){controlSavedMap(false);});
+        document.getElementById('btnRefreshSavedMaps').addEventListener('click',refreshSavedMaps);
+
+        // 模式切换
+        document.getElementById('btnModeSim').addEventListener('click', function () {
+          setMode('sim');
+          showToast('演示模式：画面和状态均为模拟数据', 'info');
+        });
+        document.getElementById('btnModeLive').addEventListener('click', function () { setMode('live'); });
+
+        // 连接配置弹窗
+        const modalConn = document.getElementById('modalConnection');
+        document.getElementById('btnConnectConfig').addEventListener('click', function () {
+          document.getElementById('modalInputIp').value = document.getElementById('inputRobotIp').value;
+          modalConn.classList.remove('hidden');
+          modalConn.classList.add('flex');
+        });
+        function closeConnModal() {
+          modalConn.classList.add('hidden');
+          modalConn.classList.remove('flex');
+        }
+        document.getElementById('btnCloseConnModal').addEventListener('click', closeConnModal);
+        document.getElementById('btnCancelConnModal').addEventListener('click', closeConnModal);
+        document.getElementById('btnSaveConnModal').addEventListener('click', function () {
+          const ip = document.getElementById('modalInputIp').value.trim() || '192.168.3.73';
+          state.robotIp = ip;
+          state.rosbridgePort = parseInt(document.getElementById('modalInputRosPort').value, 10) || 9090;
+          state.videoPort = parseInt(document.getElementById('modalInputVideoPort').value, 10) || 8080;
+          state.agentPort = parseInt(document.getElementById('modalInputAgentPort').value, 10) || 8000;
+          document.getElementById('inputRobotIp').value = ip;
+          updateConnectionBadges();
+          if (state.mode === 'live') connectLiveRobot();
+          closeConnModal();
+          showToast('已更新机器人局域网地址为 ' + ip, 'success');
+        });
+
+        // 软急停与解除
+        document.getElementById('btnSoftEstop').addEventListener('click', function () {
+          engageSoftEstop(true);
+        });
+        document.getElementById('btnReleaseEstop').addEventListener('click', function () {
+          engageSoftEstop(false);
+        });
+
+        // 电池有/无样本切换 (对应 2026-11-06 核验报告中“电池偶发无样本”边界测试)
+        document.getElementById('btnToggleBatterySim').addEventListener('click', function () {
+          if (state.mode === 'live') { reportError('当前版本未接入此实车功能'); return; }
+          state.batteryHasSample = !state.batteryHasSample;
+          telemetrySecondTick();
+          showToast(
+            state.batteryHasSample ? '已恢复 /ros_robot_controller/battery 电压样本输入' : '已模拟“电池话题暂无样本”保护态',
+            'info'
+          );
+        });
+
+        // 相机源下拉框切换
+        document.getElementById('selectCameraTopic').addEventListener('change', function (e) {
+          state.selectedCameraTopic = e.target.value;
+          refreshCameraStreamSource();
+          appendLog('CAMERA', '视频源已切换至 ' + state.selectedCameraTopic);
+        });
+
+        document.getElementById('btnToggleCrosshair').addEventListener('click', function (e) {
+          state.showCrosshair = !state.showCrosshair;
+          e.target.textContent = '十字准星: ' + (state.showCrosshair ? '开' : '关');
+        });
+
+        document.getElementById('btnReloadStream').addEventListener('click', function () {
+          refreshCameraStreamSource();
+          showToast('已重新请求相机视频流 ' + state.selectedCameraTopic, 'info');
+        });
+
+        document.getElementById('btnSnapshotCam').addEventListener('click', function () {
+          if (state.mode === 'live') { reportError('当前版本未接入此实车功能'); return; }
+          const canvas = document.getElementById('cameraCanvas');
+          try {
+            const url = canvas.toDataURL('image/png');
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'jetauto_cam_' + Date.now() + '.png';
+            a.click();
+            showToast('已保存当前相机画面快照 (.png)', 'success');
+          } catch (err) {
+            showToast('快照已捕获', 'info');
+          }
+        });
+
+        // 2D / 3D 视图切换
+        const btn2D = document.getElementById('btnView2D');
+        const btn3D = document.getElementById('btnView3D');
+        const c2D = document.getElementById('mapCanvas2D');
+        const c3D = document.getElementById('mapContainer3D');
+
+        btn2D.addEventListener('click', function () {
+          state.mapViewMode = '2d';
+          c2D.classList.remove('hidden');
+          c3D.classList.add('hidden');
+          btn2D.className = 'px-2.5 py-1 text-xs font-semibold rounded-md bg-white text-blue-600 shadow-sm transition-all';
+          btn3D.className = 'px-2.5 py-1 text-xs font-semibold rounded-md text-slate-600 hover:text-slate-900 transition-all';
+        });
+
+        btn3D.addEventListener('click', function () {
+          state.mapViewMode = '3d';
+          c2D.classList.add('hidden');
+          c3D.classList.remove('hidden');
+          btn3D.className = 'px-2.5 py-1 text-xs font-semibold rounded-md bg-white text-blue-600 shadow-sm transition-all';
+          btn2D.className = 'px-2.5 py-1 text-xs font-semibold rounded-md text-slate-600 hover:text-slate-900 transition-all';
+          initThreeView();
+        });
+
+        // 地图交互工具选择
+        const toolHints = {
+          pan: '当前工具：左键拖拽平移地图，滚轮缩放视图',
+          initialpose: '先在机器人真实位置拖动朝向，再点击下方确认初始位姿按钮',
+          goalpose: '当前工具：在地图上按下并拖拽朝向，立即下发 /navigate_to_pose 单点导航',
+          pickwp: '当前工具：在地图上按下并拖拽朝向，拾取坐标并新增至 Nav2 站点队列',
+        };
+        document.querySelectorAll('.map-tool-btn').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            const tool = btn.getAttribute('data-tool');
+            state.mapTool = tool;
+            document.querySelectorAll('.map-tool-btn').forEach(function (b) {
+              b.className = 'map-tool-btn px-2.5 py-1 text-xs font-medium rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors';
+            });
+            btn.className = 'map-tool-btn px-2.5 py-1 text-xs font-medium rounded-md bg-blue-600 text-white transition-colors';
+            document.getElementById('mapToolHint').textContent = toolHints[tool] || '';
+          });
+        });
+
+        document.getElementById('btnFitMap').addEventListener('click', function () {
+          if (state.mode==='live' && !liveMap.fit(state.mapPan)) showToast('尚未收到地图','warn');
+        });
+        document.getElementById('btnResetMapView').addEventListener('click', function () {
+          if (state.mode==='live') {
+            if (!liveMap.center(state.mapPan)) showToast('等待有效的机器人 TF 位姿','warn');
+            return;
+          }
+          state.mapPan.x = 0;
+          state.mapPan.y = 0;
+          state.mapPan.zoom = 42;
+        });
+
+        document.getElementById('chkLayerMap').addEventListener('change', function(e) { state.layers.map=e.target.checked; });
+        // 图层复选框
+        document.getElementById('chkLayerScan').addEventListener('change', function (e) { state.layers.scan = e.target.checked; });
+        document.getElementById('chkLayerCostmap').addEventListener('change', function (e) { state.layers.costmap = e.target.checked; });
+        document.getElementById('chkLayerPlan').addEventListener('change', function (e) { state.layers.plan = e.target.checked; });
+        document.getElementById('chkLayerWaypoints').addEventListener('change', function (e) { state.layers.waypoints = e.target.checked; });
+
+        // 2D 地图 Canvas 鼠标事件
+        c2D.addEventListener('mousedown', function (e) {
+          const rect = c2D.getBoundingClientRect();
+          const px = e.clientX - rect.left;
+          const py = e.clientY - rect.top;
+          const wPt = canvasToWorld(px, py, c2D);
+          state.dragState.active = true;
+          state.dragState.startX = px;
+          state.dragState.startY = py;
+          state.dragState.worldStartX = wPt.x;
+          state.dragState.worldStartY = wPt.y;
+          state.dragState.worldCurrX = wPt.x;
+          state.dragState.worldCurrY = wPt.y;
+        });
+
+        window.addEventListener('mousemove', function (e) {
+          if (!state.dragState.active) return;
+          const rect = c2D.getBoundingClientRect();
+          const px = e.clientX - rect.left;
+          const py = e.clientY - rect.top;
+          if (state.mapTool === 'pan') {
+            if (state.mode==='live') liveMap.autoFit=false;
+            state.mapPan.x += (px - state.dragState.startX);
+            state.mapPan.y += (py - state.dragState.startY);
+            state.dragState.startX = px;
+            state.dragState.startY = py;
+          } else {
+            const wPt = canvasToWorld(px, py, c2D);
+            state.dragState.worldCurrX = wPt.x;
+            state.dragState.worldCurrY = wPt.y;
+          }
+        });
+
+        window.addEventListener('mouseup', function () {
+          if (!state.dragState.active) return;
+          state.dragState.active = false;
+          if (state.mapTool === 'pan') return;
+
+          const wx = state.dragState.worldStartX;
+          const wy = state.dragState.worldStartY;
+          const dx = state.dragState.worldCurrX - wx;
+          const dy = state.dragState.worldCurrY - wy;
+          const yawRad = Math.hypot(dx, dy) > 0.05 ? Math.atan2(dy, dx) : 0;
+          const yawDeg = Math.round(radToDeg(yawRad));
+
+          if (state.mode==='live' && state.mapTool==='initialpose') {
+            state.initialPoseDraft={x:wx,y:wy,yaw_deg:yawDeg};
+            setText('initialPoseDraft','待确认：X='+wx.toFixed(2)+'m，Y='+wy.toFixed(2)+'m，朝向='+yawDeg+'°；请核对机器人实际位置');
+            updateNavControls();return;
+          }
+          if (state.mapTool === 'initialpose') {
+            state.robotPose.x = wx;
+            state.robotPose.y = wy;
+            state.robotPose.yaw = yawRad;
+            appendLog(
+              'AMCL',
+              '发布 /initialpose: X=' + wx.toFixed(2) + ', Y=' + wy.toFixed(2) + ', Yaw=' + yawDeg + '° (z=' + Math.sin(yawRad / 2).toFixed(3) + ', w=' + Math.cos(yawRad / 2).toFixed(3) + ')'
+            );
+            showToast('已标定 AMCL 初始位姿 (/initialpose)', 'success');
+          } else if (state.mapTool === 'goalpose') {
+            const tempWp = {
+              id: 'wp-goal-' + Date.now(),
+              name: '地图点选目标 (' + wx.toFixed(1) + ',' + wy.toFixed(1) + ')',
+              x: +wx.toFixed(2),
+              y: +wy.toFixed(2),
+              yawDeg: yawDeg,
+              dwellSec: 1.0,
+            };
+            state.waypoints.push(tempWp);
+            startNavigationTask('single', state.waypoints.length - 1);
+          } else if (state.mapTool === 'pickwp') {
+            const newWp = {
+              id: 'wp-' + Date.now(),
+              name: '巡检点 #' + (state.waypoints.length + 1),
+              x: +wx.toFixed(2),
+              y: +wy.toFixed(2),
+              yawDeg: yawDeg,
+              dwellSec: 2.0,
+            };
+            state.waypoints.push(newWp);
+            renderWaypointsList();
+            appendLog('WAYPOINT', '地图拾取新增站点: ' + newWp.name + ' (' + newWp.x + ', ' + newWp.y + ', ' + newWp.yawDeg + '°)');
+            showToast('已拾取并添加站点：' + newWp.name, 'success');
+          }
+        });
+
+        c2D.addEventListener('wheel', function (e) {
+          e.preventDefault();
+          const factor = e.deltaY < 0 ? 1.12 : 0.9;
+          if (state.mode==='live') {
+            const rect=c2D.getBoundingClientRect(), px=e.clientX-rect.left, py=e.clientY-rect.top;
+            const world=canvasToWorld(px,py,c2D);
+            state.mapPan.zoom=Math.max(0.1,Math.min(300,state.mapPan.zoom*factor));
+            state.mapPan.x=px-c2D.width/2-world.x*state.mapPan.zoom;
+            state.mapPan.y=py-c2D.height/2+world.y*state.mapPan.zoom;
+            liveMap.autoFit=false; liveMap.needsFit=false;
+          } else state.mapPan.zoom = Math.max(20, Math.min(90, state.mapPan.zoom * factor));
+        }, { passive: false });
+
+        // 虚拟摇杆拖拽事件
+        const pad = document.getElementById('joystickPad');
+        const knob = document.getElementById('joystickKnob');
+        let joyActive = false;
+
+        function handleJoystickMove(clientX, clientY) {
+          if (!joyActive) return;
+          const rect = pad.getBoundingClientRect();
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          const maxR = rect.width / 2 - 28;
+          let dx = clientX - cx;
+          let dy = clientY - cy;
+          const dist = Math.hypot(dx, dy);
+          if (dist > maxR) {
+            dx = (dx / dist) * maxR;
+            dy = (dy / dist) * maxR;
+          }
+          knob.style.transform = 'translate(' + dx.toFixed(1) + 'px, ' + dy.toFixed(1) + 'px)';
+          // 屏幕向上 (-dy) 对应车体前进 +linear.x；屏幕向左 (-dx) 对应麦轮左移 +linear.y
+          const normX = -dy / maxR;
+          const normY = -dx / maxR;
+          const lx = normX * 0.20 * state.speedScale;
+          const ly = normY * 0.20 * state.speedScale;
+          knob.textContent = lx.toFixed(2);
+          publishCmdVel(lx, ly, state.cmdVel.az);
+        }
+
+        pad.addEventListener('pointerdown', function (e) {
+          if (state.estopEngaged) {
+            showToast('软急停已锁定，请先解除急停！', 'danger');
+            return;
+          }
+          joyActive = true;
+          pad.setPointerCapture(e.pointerId);
+          handleJoystickMove(e.clientX, e.clientY);
+        });
+        pad.addEventListener('pointermove', function (e) {
+          handleJoystickMove(e.clientX, e.clientY);
+        });
+        function endJoystick() {
+          if (!joyActive) return;
+          joyActive = false;
+          resetJoystickUI();
+          publishCmdVel(0, 0, 0);
+        }
+        pad.addEventListener('pointerup', endJoystick);
+        pad.addEventListener('pointercancel', endJoystick);
+        pad.addEventListener('lostpointercapture', endJoystick);
+
+        // 左旋 / 右旋按钮
+        const btnYawL = document.getElementById('btnYawLeft');
+        const btnYawR = document.getElementById('btnYawRight');
+        btnYawL.addEventListener('pointerdown', function (e) {
+          btnYawL.setPointerCapture(e.pointerId);
+          publishCmdVel(state.cmdVel.lx, state.cmdVel.ly, 0.50 * state.speedScale);
+        });
+        btnYawL.addEventListener('pointerup', function () {
+          publishCmdVel(state.cmdVel.lx, state.cmdVel.ly, 0);
+        });
+        btnYawR.addEventListener('pointerdown', function (e) {
+          btnYawR.setPointerCapture(e.pointerId);
+          publishCmdVel(state.cmdVel.lx, state.cmdVel.ly, -0.50 * state.speedScale);
+        });
+        btnYawR.addEventListener('pointerup', function () {
+          publishCmdVel(state.cmdVel.lx, state.cmdVel.ly, 0);
+        });
+
+        [btnYawL, btnYawR].forEach(function (button) {
+          ['pointercancel', 'lostpointercapture'].forEach(function (event) {
+            button.addEventListener(event, function () { publishCmdVel(0, 0, 0); });
+          });
+        });
+        function stopInput() { joyActive = false; transport.zero(); resetLocalCommand(); }
+        window.addEventListener('blur', stopInput);
+        window.addEventListener('pagehide', stopInput);
+        document.addEventListener('visibilitychange', function () { if (document.hidden) stopInput(); });
+
+        // 速度档位滑块与立即刹车
+        document.getElementById('sliderSpeedScale').addEventListener('input', function (e) {
+          const pct = parseInt(e.target.value, 10) || 100;
+          state.speedScale = pct / 100.0;
+          document.getElementById('valSpeedScale').textContent = pct + '%';
+        });
+
+        document.getElementById('btnZeroStop').addEventListener('click', function () {
+          resetJoystickUI();
+          publishCmdVel(0, 0, 0);
+          showToast('已请求停车；执行中的导航也会被取消', 'info');
+        });
+
+        document.getElementById('btnResetOdom').addEventListener('click', function () {
+          if (state.mode === 'live') { reportError('当前版本未接入此实车功能'); return; }
+          state.robotPose.x = 0;
+          state.robotPose.y = 0;
+          state.robotPose.yaw = 0;
+          appendLog('ODOM', '已向 /set_odom 发布 Pose2D(0,0,0) 重置里程计');
+          showToast('已重置里程计位姿 (/set_odom)', 'info');
+        });
+
+        // 键盘 WASD / QE 与空格急停支持
+        window.addEventListener('keydown', function (e) {
+          if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+          if (e.code === 'Space') {
+            e.preventDefault();
+            engageSoftEstop(true);
+            return;
+          }
+          if (state.estopEngaged || e.repeat) return;
+          const k = e.key.toLowerCase();
+          const vLin = 0.20 * state.speedScale;
+          const vAng = 0.50 * state.speedScale;
+          if (k === 'w') publishCmdVel(vLin, state.cmdVel.ly, state.cmdVel.az);
+          else if (k === 's') publishCmdVel(-vLin, state.cmdVel.ly, state.cmdVel.az);
+          else if (k === 'a') publishCmdVel(state.cmdVel.lx, vLin, state.cmdVel.az);
+          else if (k === 'd') publishCmdVel(state.cmdVel.lx, -vLin, state.cmdVel.az);
+          else if (k === 'q') publishCmdVel(state.cmdVel.lx, state.cmdVel.ly, vAng);
+          else if (k === 'e') publishCmdVel(state.cmdVel.lx, state.cmdVel.ly, -vAng);
+        });
+
+        window.addEventListener('keyup', function (e) {
+          const k = e.key.toLowerCase();
+          if (['w', 's', 'a', 'd', 'q', 'e'].includes(k)) {
+            publishCmdVel(0, 0, 0);
+          }
+        });
+
+        // Nav2 任务编排按钮
+        document.getElementById('btnNavStart').addEventListener('click', function () {
+          startNavigationTask();
+        });
+
+        document.getElementById('btnNavPause').addEventListener('click', function () {
+          if (state.mode==='live') {navigationAction('pause');return;}
+          if (state.navStatus.code !== 2) {
+            showToast('当前无正在执行的导航任务', 'info');
+            return;
+          }
+          state.navStatus.paused = true;
+          state.navStatus.text = '5: PAUSED (已保存断点 #' + (state.navStatus.currentWpIdx + 1) + ')';
+          publishCmdVel(0, 0, 0);
+          updateNavUI();
+          appendLog('NAV2', '已软暂停任务：发送 Cancel Goal 并保存断点索引 #' + (state.navStatus.currentWpIdx + 1));
+          showToast('导航已软暂停，可点击“断点恢复”继续剩余站点', 'warn');
+        });
+
+        document.getElementById('btnNavResume').addEventListener('click', function () {
+          if (state.mode==='live') {navigationAction('resume');return;}
+          if (!state.navStatus.paused) {
+            showToast('当前没有处于暂停态的导航任务', 'info');
+            return;
+          }
+          state.navStatus.paused = false;
+          state.navStatus.code = 2;
+          state.navStatus.text = '2: EXECUTING (断点恢复)';
+          rebuildActivePlanPath();
+          updateNavUI();
+          appendLog('NAV2', '已从站点 #' + (state.navStatus.currentWpIdx + 1) + ' 恢复剩余航点导航');
+          showToast('已从断点恢复导航任务', 'success');
+        });
+
+        document.getElementById('btnNavCancel').addEventListener('click', function () {
+          if (state.mode==='live') {navigationAction('cancel');return;}
+          state.navStatus.code = 5;
+          state.navStatus.text = '5: CANCELED (已取消)';
+          state.navStatus.paused = false;
+          state.navStatus.activePath = [];
+          state.navStatus.distRemaining = 0;
+          state.navStatus.timeRemaining = 0;
+          renderWaypointsList();
+          appendLog('NAV2', '客户端主动取消当前 Goal UUID (GoalStatus=5 CANCELED)');
+          showToast('已取消当前 Nav2 导航目标', 'info');
+        });
+
+        // 新增站点：保存当前车体位姿
+        document.getElementById('btnAddCurrentPoseWp').addEventListener('click', function () {
+          const pose=state.mode==='live'?liveMap.validPose():state.robotPose;
+          if (!pose) {reportError('等待有效地图坐标位姿');return;}
+          const wp = {
+            id: 'wp-' + Date.now(),
+            name: '车体采样点 #' + (state.waypoints.length + 1),
+            x: +pose.x.toFixed(2),
+            y: +pose.y.toFixed(2),
+            yawDeg: Math.round(radToDeg(pose.yaw)),
+            dwellSec: 2.0,
+          };
+          state.waypoints.push(wp);
+          renderWaypointsList();
+          showToast('已将当前机器人位姿保存为站点：' + wp.name, 'success');
+        });
+
+        // 手动新增站点弹窗
+        const modalWp = document.getElementById('modalWaypoint');
+        document.getElementById('btnOpenAddWpModal').addEventListener('click', function () {
+          modalWp.classList.remove('hidden');
+          modalWp.classList.add('flex');
+        });
+        function closeWpModal() {
+          modalWp.classList.add('hidden');
+          modalWp.classList.remove('flex');
+        }
+        document.getElementById('btnCloseWpModal').addEventListener('click', closeWpModal);
+        document.getElementById('btnCancelWpModal').addEventListener('click', closeWpModal);
+        document.getElementById('btnConfirmAddWp').addEventListener('click', function () {
+          const name = document.getElementById('wpInputName').value.trim() || ('站点 #' + (state.waypoints.length + 1));
+          const x = parseFloat(document.getElementById('wpInputX').value) || 0;
+          const y = parseFloat(document.getElementById('wpInputY').value) || 0;
+          const yawDeg = parseFloat(document.getElementById('wpInputYaw').value) || 0;
+          const dwellSec = parseFloat(document.getElementById('wpInputDwell').value) || 1.0;
+          state.waypoints.push({ id: 'wp-' + Date.now(), name, x, y, yawDeg, dwellSec });
+          renderWaypointsList();
+          closeWpModal();
+          showToast('已添加导航站点：' + name, 'success');
+        });
+
+        // 保存地图 map_saver_cli 按钮
+        document.getElementById('btnSaveMapCli').addEventListener('click', async function () {
+          const outPath = document.getElementById('inputSaveMapPath').value.trim();
+          if (!outPath) {
+            showToast('请输入有效的地图保存输出路径', 'warn');
+            return;
+          }
+          if (state.mode === 'live') {
+            const button = document.getElementById('btnSaveMapCli');
+            button.disabled = true;
+            try {
+              const result = await transport.api('/api/map/save', { output_path: outPath }, 20000);
+              showToast('地图保存成功：' + result.output_path, 'success');
+            } catch (err) { reportError(err.message); }
+            finally { button.disabled = false; }
+            return;
+          }
+          appendLog(
+            'MAP_SAVER',
+            '执行: ros2 run nav2_map_server map_saver_cli -f ' + outPath + ' --ros-args -p map_subscribe_transient_local:=true'
+          );
+          appendLog('MAP_SAVER', '成功生成占据栅格文件: ' + outPath + '.pgm 与 ' + outPath + '.yaml');
+          showToast('地图已保存至 ' + outPath + '.{pgm,yaml}', 'success');
+        });
+
+        document.getElementById('btnClearLogs').addEventListener('click', function () {
+          document.getElementById('launchLogConsole').innerHTML = '';
+        });
+
+        // 节点拓扑与 JSON 导出查看弹窗
+        const modalInfo = document.getElementById('modalInfoViewer');
+        function openInfoModal(title, content) {
+          document.getElementById('modalInfoTitle').textContent = title;
+          document.getElementById('modalInfoPre').textContent = content;
+          modalInfo.classList.remove('hidden');
+          modalInfo.classList.add('flex');
+        }
+        function closeInfoModal() {
+          modalInfo.classList.add('hidden');
+          modalInfo.classList.remove('flex');
+        }
+        document.getElementById('btnCloseInfoModal').addEventListener('click', closeInfoModal);
+        document.getElementById('btnOkInfoModal').addEventListener('click', closeInfoModal);
+        document.getElementById('btnCopyInfoModal').addEventListener('click', function () {
+          const text = document.getElementById('modalInfoPre').textContent;
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          showToast('已复制到剪贴板', 'success');
+        });
+
+        document.getElementById('btnInspectNodes').addEventListener('click', async function () {
+          if (state.mode === 'live') {
+            try { const h = await transport.api('/api/health'); openInfoModal('实际 ROS 图与就绪状态', JSON.stringify(h, null, 2)); }
+            catch (err) { reportError(err.message); }
+            return;
+          }
+          const activeMods = state.launchModules.filter(function (m) { return m.running; });
+          const report = [
+            '# JetAuto Pro (192.168.3.73) 在线节点与核心接口快照',
+            'ROS_DISTRO=humble | MACHINE_TYPE=JetAutoPro | LIDAR_TYPE=G4',
+            '',
+            '## 活跃 Launch 进程组 (' + activeMods.length + ' / ' + state.launchModules.length + '):',
+          ].concat(activeMods.map(function (m) {
+            return '  - [PID ' + m.pid + '] ' + m.name + '  =>  ' + m.cmd;
+          })).concat([
+            '',
+            '## 关键 Topic 与 Action 绑定核验:',
+            '  - 底盘速度控制: /cmd_vel (geometry_msgs/msg/Twist, 限幅 ±0.20m/s, ±0.50rad/s)',
+            '  - 动力电池电压: /ros_robot_controller/battery (std_msgs/msg/UInt16)',
+            '  - 默认相机画面: /depth_cam/rgb/image_raw (sensor_msgs/msg/Image)',
+            '  - 可选相机画面: /depth_cam/depth/image_raw, /object_tracking/image_result',
+            '  - 雷达滤波扫描: /scan (sensor_msgs/msg/LaserScan, lidar_frame)',
+            '  - 网页 Nav2 Actions: /navigate_to_pose, /navigate_through_poses；逐点驻留由网关编排',
+          ]).join('\n');
+          openInfoModal('ROS 2 Humble 在线节点拓扑与接口核验', report);
+        });
+
+        document.getElementById('btnExportWaypoints').addEventListener('click', function () {
+          const jsonStr = JSON.stringify({
+            robot: 'Hiwonder JetAuto Pro',
+            frame_id: 'map',
+            exported_at: new Date().toISOString(),
+            waypoints: state.waypoints,
+          }, null, 2);
+          openInfoModal('导出 Nav2 导航站点配置 (JSON)', jsonStr);
+        });
+      }
+
+      // ==================== 12. 初始化入口 ====================
+      window.addEventListener('DOMContentLoaded', function () {
+        bindEvents();
+        if (location.hostname && !['localhost','127.0.0.1'].includes(location.hostname)) {
+          document.getElementById('inputRobotIp').value = location.hostname;
+        }
+        setMode('live');
+        renderLaunchModules();
+        renderWaypointsList();
+        updateConnectionBadges();
+        refreshCameraStreamSource();
+
+        appendLog('SYSTEM', 'Hiwonder JetAuto Pro 数字驾驶舱初始化完成 (默认使用页面所在主机；实车模式)');
+        appendLog('VERIFY', '实车速度经过网关租约控制；请先启动完整底盘、相机与视频服务');
+
+        setInterval(simulationTick, 50);
+        setInterval(telemetrySecondTick, 1000);
+        telemetrySecondTick();
+      });
+    })();
+  </script>
+</body>
+</html>
