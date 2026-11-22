@@ -16,11 +16,13 @@ import signal
 import shlex
 import re
 import uuid
-from contextlib import asynccontextmanager
+import tempfile
+from contextlib import asynccontextmanager, nullcontext
 from control_safety import VelocityLease, MotionArbiter, ControlError
 from navigation_bridge import NavigationBridge
 from mapping_stream import MappingFeed
 from saved_maps import SavedMapManager
+from costmap_settings import CostmapSettingsStore, RuntimeCostmapSettings, SettingsError, differences
 import subprocess
 import threading
 import time
@@ -45,7 +47,7 @@ except ImportError:
 
 app = FastAPI(
     title="JetAuto Pro ROS 2 Humble Cockpit Gateway",
-    version="1.0.0",
+    version="2.0",
     description="车端网关服务：硬件遥测、手动/导航速度仲裁、初始定位、Nav2 任务与 Launch 管理",
 )
 
@@ -63,6 +65,7 @@ WAYPOINTS_FILE = Path(__file__).parent / "waypoints_store.json"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROS_ENV_PREFIX = "source " + shlex.quote(str(SCRIPT_DIR / "ros_env.sh"))
+costmap_settings_store = CostmapSettingsStore(SCRIPT_DIR / 'config/nav2_params.yaml')
 
 
 
@@ -98,6 +101,11 @@ class LaunchActionRequest(BaseModel):
 
 class MapSaveRequest(BaseModel):
     output_path: str = Field(..., description="map_saver_cli 输出完整路径（不含扩展名）")
+
+
+class CostmapSettingsRequest(BaseModel):
+    revision: str = Field(..., min_length=64, max_length=64)
+    settings: dict
 
 
 # ==================== Launch 进程组管理器 ====================
@@ -248,7 +256,9 @@ class ProcessManager:
                 except ImportError as exc:
                     raise HTTPException(503,"未加载 ROS 包索引环境") from exc
                 missing=[]
-                for package in ("nav2_map_server","nav2_amcl","nav2_lifecycle_manager","nav2_controller","nav2_planner","nav2_bt_navigator"):
+                for package in ("nav2_map_server","nav2_amcl","nav2_lifecycle_manager","nav2_controller",
+                                "nav2_planner","nav2_bt_navigator","nav2_theta_star_planner","nav2_smoother",
+                                "nav2_velocity_smoother","nav2_waypoint_follower","nav2_behaviors","dwb_critics"):
                     try:get_package_share_directory(package)
                     except LookupError:missing.append(package)
                 if missing:
@@ -410,6 +420,8 @@ class JetAutoCockpitNode:
         self.init_error = None
         self.mapping = None
         self.mapping_error = None
+        self.costmap_parameters = None
+        self.costmap_parameters_error = None
         self._mapping_node = None
         self._mapping_executor = None
         self.navigation = None
@@ -440,6 +452,10 @@ class JetAutoCockpitNode:
                 from rclpy.executors import SingleThreadedExecutor, ExternalShutdownException
                 self._mapping_node = rclpy.create_node("jetauto_web_mapping")
                 self.mapping = MappingFeed(self._mapping_node)
+                try:
+                    self.costmap_parameters = RuntimeCostmapSettings(self._mapping_node)
+                except Exception as exc:
+                    self.costmap_parameters_error = str(exc)
                 self._mapping_executor = SingleThreadedExecutor()
                 self._mapping_executor.add_node(self._mapping_node)
                 def spin_mapping():
@@ -490,16 +506,21 @@ class JetAutoCockpitNode:
             self._cmd_vel_pub.publish(msg)
 
     def send_cmd_vel(self, cmd, owner=None):
-        if self.navigation and self.navigation.automatic.active() and any((cmd.linear_x,cmd.linear_y,cmd.angular_z)):
-            raise HTTPException(409,'自动定位中请保持静止；需要手动驾驶时先取消自动定位')
-        if self.navigation and self.navigation.thread and self.navigation.thread.is_alive():
-            if any((cmd.linear_x,cmd.linear_y,cmd.angular_z)):
-                raise HTTPException(409,"导航任务正在执行，请先暂停或取消后手动接管")
-            self.navigation.cancel('manual_stop')
-        try:
-            self.control.command_from(owner or cmd.client_id, cmd.linear_x, cmd.linear_y, cmd.angular_z)
-        except ControlError as exc:
-            raise HTTPException(exc.status, exc.detail) from exc
+        nav = self.navigation
+        moving = any((cmd.linear_x, cmd.linear_y, cmd.angular_z))
+        # Use the same lock order as NavigationBridge.start: navigation, then
+        # the manual lease. The ownership check and first command are atomic.
+        with nav.lock if nav else nullcontext():
+            if moving and nav and nav.automatic.active():
+                raise HTTPException(409,'自动定位中请保持静止；需要手动驾驶时先取消自动定位')
+            if nav and nav.thread and nav.thread.is_alive():
+                if moving:
+                    raise HTTPException(409,'导航任务正在执行，请先暂停或取消后手动接管')
+                nav.cancel('manual_stop')
+            try:
+                self.control.command_from(owner or cmd.client_id, cmd.linear_x, cmd.linear_y, cmd.angular_z)
+            except ControlError as exc:
+                raise HTTPException(exc.status, exc.detail) from exc
 
     def trigger_estop(self, engage):
         self.control.set_estop(engage)
@@ -601,7 +622,7 @@ def get_health():
 @app.post("/api/cmd_vel")
 def post_cmd_vel(cmd: TwistCommand):
     cockpit_node.send_cmd_vel(cmd)
-    return {"ok": True, "topic": "/cmd_vel", "cmd": cmd.dict()}
+    return {"ok": True, "topic": "/cmd_vel", "cmd": dict(cmd)}
 
 
 @app.post("/api/estop")
@@ -615,6 +636,37 @@ def get_launches():
     return {"modules": process_mgr.status_all()}
 
 
+def costmap_settings_report(report):
+    runtime = cockpit_node.costmap_parameters.snapshot() if cockpit_node.costmap_parameters else {}
+    pending = differences(report['settings'], runtime)
+    for name in ('global', 'local'):
+        row = runtime.setdefault(name, {'available': False, 'issue': cockpit_node.costmap_parameters_error or '运行参数读取未就绪'})
+        costs = getattr(cockpit_node.mapping, 'costmaps', None)
+        grid, _ = costs.raw(name) if costs else (None, None)
+        if grid:
+            row['grid_resolution'] = grid['grid']['resolution']
+            if abs(row['grid_resolution'] - report['settings'][name]['resolution']) > 1e-7:
+                report['warnings'].append(name + ' 实际栅格分辨率与保存值不同；全局静态层会采用原始地图分辨率')
+    return dict(report, ok=True, runtime=runtime, pending_changes=pending,
+                restart_required=bool(pending) if pending is not None else None)
+
+
+@app.get('/api/navigation/costmap-settings')
+def get_costmap_settings():
+    try:
+        return costmap_settings_report(costmap_settings_store.read())
+    except SettingsError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
+@app.post('/api/navigation/costmap-settings')
+def save_costmap_settings(req: CostmapSettingsRequest):
+    try:
+        return costmap_settings_report(costmap_settings_store.save(req.settings, req.revision))
+    except SettingsError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
 @app.post("/api/launches")
 def control_launch(req: LaunchActionRequest):
     if req.action in ("start","restart") and req.module_id in ("slam","navigation") and saved_map_mgr.status()["running"]:
@@ -625,7 +677,8 @@ def control_launch(req: LaunchActionRequest):
                 raise HTTPException(409,'已有地图发布者，请先停止保存地图服务或 SLAM')
             if cockpit_node.navigation:cockpit_node.navigation.invalidate()
         result=process_mgr.start(req.module_id, req.map_path)
-        if req.module_id=='navigation' and cockpit_node.navigation:cockpit_node.navigation.automatic.arm()
+        if req.module_id=='navigation' and cockpit_node.navigation and result['status']=='starting':
+            cockpit_node.navigation.automatic.arm()
         return result
     if req.action in ("stop", "restart") and req.module_id in ("controller", "slam", "navigation"):
         if cockpit_node.navigation:cockpit_node.navigation.invalidate()
@@ -709,7 +762,7 @@ class InitialPoseRequest(BaseModel):
 
 @app.post("/api/localization/initialpose")
 def set_initial_pose(req: InitialPoseRequest):
-    return require_navigation().initial_pose(req.dict(),req.confirmed)
+    return require_navigation().initial_pose(dict(req),req.confirmed)
 
 
 @app.get("/api/navigation/status")
@@ -729,7 +782,12 @@ def cancel_auto_localization():
 
 @app.post("/api/navigation/task")
 def navigation_task(req: NavTaskRequest):
-    return require_navigation().start(req.mode,[w.dict() for w in req.waypoints],req.loop_count)
+    return require_navigation().start(req.mode,[dict(w) for w in req.waypoints],req.loop_count)
+
+
+@app.post("/api/navigation/precheck")
+def navigation_precheck(req: NavTaskRequest):
+    return require_navigation().precheck([dict(w) for w in req.waypoints])
 
 
 @app.post("/api/navigation/cancel")
@@ -761,8 +819,19 @@ def list_waypoints():
 
 @app.post("/api/waypoints")
 def save_waypoints(waypoints: List[WaypointItem]):
-    payload = {"waypoints": [w.dict() for w in waypoints]}
-    WAYPOINTS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = {"waypoints": [dict(w) for w in waypoints]}
+    filename = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=WAYPOINTS_FILE.parent,
+                                         prefix='.waypoints-', delete=False) as output:
+            filename = output.name
+            json.dump(payload, output, ensure_ascii=False, allow_nan=False, indent=2)
+        os.replace(filename, WAYPOINTS_FILE)
+    except ValueError as exc:
+        raise HTTPException(422, '站点参数必须是有限数字') from exc
+    finally:
+        if filename is not None:
+            Path(filename).unlink(missing_ok=True)
     return payload
 
 
@@ -784,14 +853,18 @@ async def websocket_mapping(ws: WebSocket):
     """Read-only channel, independent of control/telemetry reconnects."""
     await ws.accept()
     revision = None
+    costmap_revisions={}
     try:
         while True:
             if cockpit_node.mapping is None:
                 payload = {"type": "mapping", "available": False,
                            "detail": cockpit_node.mapping_error or "ROS 地图订阅尚未就绪"}
             else:
-                payload = await asyncio.to_thread(cockpit_node.mapping.snapshot, revision)
+                payload = await asyncio.to_thread(cockpit_node.mapping.snapshot, revision, costmap_revisions)
                 revision = payload["map_revision"]
+                for name,entry in payload.get('costmaps',{}).items():
+                    if entry.get('grid'):costmap_revisions[name]=entry['revision']
+                    if not entry.get('available'):costmap_revisions.pop(name,None)
             await ws.send_json(payload)
             await asyncio.sleep(0.1 if payload["available"] else 1)
     except (WebSocketDisconnect, RuntimeError, OSError):

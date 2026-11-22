@@ -72,6 +72,34 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(data['scan']['points'],[[11,20],[10,22]])
         self.assertNotIn('map',f.snapshot(last_revision=1))  # large grid sent only on change
 
+    def test_duplicate_static_map_keeps_revision_and_costmap(self):
+        f = self.feed()
+        f.on_map(map_msg())
+        m = map_msg()
+        m.header.stamp = stamp(201)
+        f.costmaps = S(reset=lambda: self.fail('identical map reset the costmap'))
+        f.on_map(m)
+        self.assertEqual(f.revision, 1)
+
+    def test_fresh_delivery_cannot_revalidate_an_old_laser_scan(self):
+        f = self.feed()
+        f.on_map(map_msg())
+        f.on_scan(scan(180))
+        f.buffer = S(lookup_transform=lambda *args:S(header=S(stamp=stamp(200)),transform=transform()))
+        data = f.snapshot(include_scan_points=False)
+        self.assertFalse(data['tf']['scan'])
+        self.assertTrue(data['tf']['robot'])
+        f.on_scan(scan(200))
+        data = f.snapshot(include_scan_points=False)
+        self.assertTrue(data['tf']['scan'])
+        self.assertIsNone(data['scan'])
+        invalid = transform()
+        invalid.translation.x = float('nan')
+        f.buffer = S(lookup_transform=lambda target, source, at: S(header=S(stamp=stamp(200)),
+                     transform=invalid if source == 'lidar_frame' else transform()))
+        for draw in (True, False):
+            self.assertFalse(f.snapshot(include_scan_points=draw)['tf']['scan'])
+
     def test_missing_tf_and_stale_scan_never_draw_wrong_coordinates(self):
         f=self.feed();f.on_map(map_msg());f.scans.append((1,100.4,scan()));f.scan_received=100.4
         def fail(*args): raise LookupError('disconnected TF')

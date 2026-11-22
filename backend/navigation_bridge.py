@@ -7,10 +7,30 @@ import uuid
 import os
 from fastapi import HTTPException
 from automatic_localization import AutomaticLocalization
+from navigation_precheck import precheck
 
 
 ACTIVE=('map_server','amcl','controller_server','planner_server','smoother_server',
         'behavior_server','bt_navigator','waypoint_follower','velocity_smoother')
+
+
+def localization_issue(amcl, robot_pose, now):
+    covariance = amcl['covariance']
+    if len(covariance) != 36 or not all(math.isfinite(v) for v in covariance):
+        return 'AMCL 协方差无效'
+    xx, xy, yy, yaw_variance = (covariance[i] for i in (0, 1, 7, 35))
+    if min(xx, yy, yaw_variance) < 0 or xx * yy + 1e-9 < xy * xy:
+        return 'AMCL 协方差无效'
+    largest = (xx + yy + math.hypot(xx-yy, 2*xy)) / 2
+    if largest > .5 or yaw_variance > .5:
+        return '定位不确定度较高，请重新确认初始位姿'
+    # AMCL can legitimately stay silent at rest.
+    if robot_pose and now - amcl['received'] > 3:
+        delta = robot_pose['yaw'] - math.radians(amcl['yaw_deg'])
+        if (math.hypot(robot_pose['x']-amcl['x'], robot_pose['y']-amcl['y']) > .10 or
+                abs(math.atan2(math.sin(delta), math.cos(delta))) > .12):
+            return '机器人已移动，等待新的 AMCL 定位观测'
+    return None
 
 
 class NavigationBridge:
@@ -41,6 +61,12 @@ class NavigationBridge:
         self.result_status=None;self.error=None
         self.goal_generation=0
         self.initial_source=None
+        self.manual_good_samples = 0
+        self.manual_seed = None
+        self.manual_seed_agrees = False
+        self.manual_settled = False
+        self.manual_update = None
+        self.manual_update_sent = 0.
         self.automatic=AutomaticLocalization(self,enabled=os.environ.get('JETAUTO_AUTO_LOCALIZATION','true').lower() not in ('false','0','no'))
         node.create_timer(0.2,self._tick)
 
@@ -48,12 +74,35 @@ class NavigationBridge:
         stamp=msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
         with self.lock:
             if self.initial_stamp and stamp>=self.initial_stamp and msg.header.frame_id.lstrip('/')=='map':
+                if self.amcl and stamp <= self.amcl['stamp']:
+                    return
                 p=msg.pose.pose.position;q=msg.pose.pose.orientation
+                if not all(math.isfinite(v) for v in (p.x,p.y,q.x,q.y,q.z,q.w)) or abs(math.hypot(q.x,q.y,q.z,q.w)-1) > .01:
+                    self.amcl = None
+                    self.ready_cache['ready'] = False
+                    return
+                previous = self.amcl
                 self.amcl={'stamp':stamp,'covariance':list(msg.pose.covariance),'received':time.monotonic(),
                            'x':p.x,'y':p.y,'yaw_deg':math.degrees(math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z)))}
+                if self.initial_source == 'manual' and not self.manual_settled:
+                    stable = False
+                    seed = self.manual_seed
+                    seed_angle = math.radians(self.amcl['yaw_deg'] - seed['yaw_deg'])
+                    self.manual_seed_agrees = (
+                        math.hypot(p.x-seed['x'], p.y-seed['y']) <= .20
+                        and abs(math.atan2(math.sin(seed_angle), math.cos(seed_angle))) <= math.radians(12)
+                    )
+                    if self.manual_seed_agrees and previous and localization_issue(self.amcl, None, time.monotonic()) is None:
+                        delta = math.radians(self.amcl['yaw_deg'] - previous['yaw_deg'])
+                        stable = (math.hypot(p.x-previous['x'], p.y-previous['y']) <= .05
+                                  and abs(math.atan2(math.sin(delta), math.cos(delta))) <= math.radians(3))
+                    self.manual_good_samples = self.manual_good_samples + 1 if stable else 0
+                    self.manual_settled = self.manual_good_samples >= 3
 
     def _state_reply(self,name,future):
         with self.lock:
+            if self.state_futures.get(name,(None,))[0] is not future:
+                return
             try:
                 response=future.result()
                 self.states[name]=(response.current_state.id,time.monotonic()) if response else (0,time.monotonic())
@@ -79,19 +128,36 @@ class NavigationBridge:
         reasons=[]
         with self.lock:
             states={name:self.states.get(name,(0,0))[0] if now-self.states.get(name,(0,0))[1]<4 else 0 for name in ACTIVE}
-            confirmed=self.confirmed;amcl=copy.deepcopy(self.amcl)
         mapping=self.mapping_getter()
-        sample=mapping.snapshot(last_revision=mapping.revision) if mapping else None
+        sample=mapping.snapshot(last_revision=mapping.revision, include_scan_points=False) if mapping else None
         if self.automatic.armed and states.get('amcl')==3 and not self.motion.manual.estop:
             try:self.automatic.start()
             except HTTPException:pass
         localization=self.automatic.snapshot()
+        with self.lock:
+            confirmed, amcl, initial_stamp = self.confirmed, self.amcl, self.initial_stamp
+            seed_agrees = self.manual_seed_agrees
+            settling = self.initial_source == 'manual' and confirmed and not self.manual_settled
+            if settling and states.get('amcl') == 3 and now-self.manual_update_sent >= .5:
+                if self.manual_update is not None and not self.manual_update.done() and now-self.manual_update_sent > 2:
+                    self.manual_update.cancel()
+                    self.manual_update = None
+                if self.nomotion_client.service_is_ready() and (self.manual_update is None or self.manual_update.done()):
+                    self.manual_update = self.nomotion_client.call_async(self.Empty.Request())
+                    self.manual_update_sent = now
+        if settling:
+            if amcl and not seed_agrees:
+                reasons.append('AMCL 与人工标注相差超过 0.20 m 或 12°，请核对地图、位置和朝向')
+            else:
+                reasons.append('人工初始位姿已提交，等待 AMCL 连续 3 次稳定更新')
         if not sample or sample.get('map_revision',0)==0:reasons.append('等待地图 /map')
+        elif not sample.get('map_valid', False):reasons.append('需要唯一且有效的 /map 地图源')
         if not confirmed:reasons.append(localization['message'] if localization['enabled'] else '请在地图上确认初始位置与朝向')
         elif not amcl:reasons.append('等待 AMCL 响应初始位姿')
-        elif (not all(math.isfinite(v) for v in amcl['covariance']) or
-              max(amcl['covariance'][0],amcl['covariance'][7])>0.5 or amcl['covariance'][35]>0.5):
-            reasons.append('定位不确定度较高，请重新确认初始位姿')
+        else:
+            issue = localization_issue(amcl, sample.get('pose') if sample else None, now)
+            if issue:
+                reasons.append(issue)
         if not sample or not sample['tf']['robot']:reasons.append('等待 map → base_footprint TF')
         if not sample or not sample['tf']['scan']:reasons.append('等待激光与地图 TF 对齐')
         if not self.hardware_ready():reasons.append('底盘控制链未就绪')
@@ -102,8 +168,16 @@ class NavigationBridge:
         unexpected=[p.node_name for p in publishers if p.node_name!='jetauto_web_cockpit_gateway']
         if unexpected:reasons.append('/cmd_vel 存在未经过网关的发布源：'+', '.join(sorted(set(unexpected))))
         if self.node.count_publishers('/cockpit/nav_cmd_vel')==0:reasons.append('导航速度未接入网关私有通道')
+        costs=getattr(mapping,'costmaps',None)
+        if not costs:reasons.append('等待导航代价地图组件')
+        else:
+            _,cost_error=costs.raw('global');_,profile_error=costs.footprint()
+            if cost_error:reasons.append(cost_error)
+            if profile_error:reasons.append(profile_error)
         if self.motion.manual.estop:reasons.append('急停已锁定')
         with self.lock:
+            if initial_stamp != self.initial_stamp or confirmed != self.confirmed or amcl is not self.amcl:
+                return
             self.ready_cache={'ready':not reasons,'reasons':reasons,'lifecycle':states,
                               'initial_pose_confirmed':confirmed,'amcl_received':amcl is not None,
                               'initial_pose_source':self.initial_source,
@@ -154,6 +228,11 @@ class NavigationBridge:
         msg.pose.covariance[0]=variance_xy;msg.pose.covariance[7]=variance_xy;msg.pose.covariance[35]=variance_yaw
         self.initial_stamp=msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
         self.initial_source=source;self.amcl=None;self.ready_cache['ready']=False
+        self.manual_seed = dict(p) if source == 'manual' else None
+        self.manual_seed_agrees = False
+        self.manual_good_samples = 0
+        self.manual_settled = False
+        self.manual_update_sent = 0.
         self.pose_pub.publish(msg)
 
     def invalidate(self,reset_unresolved=False):
@@ -185,7 +264,10 @@ class NavigationBridge:
         with self.lock:
             self._check_start()
             if self.thread and self.thread.is_alive():raise HTTPException(409,'已有导航任务，请先暂停或取消')
+            if self.phase == 'PAUSED':
+                raise HTTPException(409, '已有暂停的任务，请先恢复或取消')
             if self.motion.manual.owner:raise HTTPException(409,'请先松开手动控制器')
+            self._require_precheck(points)
             self.task={'id':uuid.uuid4().hex,'mode':mode,'points':points,'loops':loop_count}
             self.index=0;self.loop=1;self.dwell_remaining=0;self.error=None;self.result_status=None
             self.metrics={'distance_remaining':0.0,'estimated_time_remaining':0.0,'navigation_time':0.0,'number_of_recoveries':0}
@@ -223,6 +305,8 @@ class NavigationBridge:
             if remaining is not None:self.index=max(0,min(len(self.task['points'])-1,len(self.task['points'])-remaining))
 
     def _execute(self,points,batch):
+        if self.stop_event.is_set():return None
+        self._require_precheck(points)
         mode='through_poses' if batch else 'single'
         action=self.actions[mode];goal=action.Goal()
         if batch:goal.poses=[self._pose(p) for p in points]
@@ -279,7 +363,10 @@ class NavigationBridge:
                         result=self._execute(points,batch)
                         self.motion.end(token)
                         if self.stop_event.is_set():break
-                        if result!=4:raise RuntimeError('导航目标未成功完成，ROS 状态 '+str(result))
+                        if result!=4:
+                            report=self.precheck(points)
+                            reason='；'.join(report['issues']) if not report['valid'] else '当前起终点碰撞检查通过，请查看 Nav2 规划/控制日志'
+                            raise RuntimeError('Nav2 中止了导航（ROS 状态 '+str(result)+'）：'+reason)
                         if batch:self.index=len(self.task['points']);break
                         self.dwell_remaining=self.task['points'][self.index]['dwell_sec'] if self.task['mode']=='waypoints' else 0
                     with self.lock:self.phase='DWELLING' if self.dwell_remaining else 'EXECUTING'
@@ -301,7 +388,7 @@ class NavigationBridge:
                     self.metrics['distance_remaining']=0.0
                     self.metrics['estimated_time_remaining']=0.0
         except Exception as exc:
-            with self.lock:self.error=str(exc);self.phase='ABORTED';self.code=6
+            with self.lock:self.error=str(exc.detail) if isinstance(exc,HTTPException) else str(exc);self.phase='ABORTED';self.code=6
         finally:self.motion.end(token)
 
     def cancel(self,reason='cancel'):
@@ -316,8 +403,19 @@ class NavigationBridge:
         with self.lock:
             self._check_start()
             if self.phase!='PAUSED' or (self.thread and self.thread.is_alive()):raise HTTPException(409,'任务尚未进入可恢复的暂停状态')
+            self._require_precheck(self.task['points'][self.index:])
             self._launch_thread()
             return {'ok':True,'state':'pending','task_id':self.task['id']}
+
+    def precheck(self,points):
+        if not 1<=len(points)<=100:raise HTTPException(422,'预检查点数应在 1–100 之间')
+        points=[self._point(p) for p in points]
+        return precheck(self.mapping_getter(),points)
+
+    def _require_precheck(self,points):
+        report=self.precheck(points)
+        if not report['valid']:raise HTTPException(422,'导航目标预检查失败：'+'；'.join(report['issues']))
+        return report
 
     def status(self):
         with self.lock:

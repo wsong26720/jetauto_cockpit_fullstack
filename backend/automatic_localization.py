@@ -80,12 +80,24 @@ class AutomaticLocalization:
                 and quality['hit_ratio']>=.65 and quality['free_ratio']>=.95)
 
     @staticmethod
-    def _rotation_clear(points):
-        # Ignore returns inside the configured body, check the swept body radius.
+    def _rotation_clear(points, body, swept_radius):
+        from navigation_precheck import inside
         for x,y in points:
-            if abs(x)<=.27 and abs(y)<=.24:continue
-            if math.hypot(x,y)<.43:return False
+            if math.hypot(x,y) >= swept_radius:
+                continue
+            if not inside(body, (x,y)):
+                return False
         return True
+
+    def _rotation_envelope(self):
+        from navigation_precheck import footprint
+        costs = self.bridge.mapping_getter().costmaps
+        profile, issue = costs.footprint() if costs else (None, '等待车体轮廓')
+        if not profile:
+            raise RuntimeError(issue or '无法读取旋转所需的车体轮廓')
+        body = footprint(dict(profile, padding=0.0))
+        swept = max(math.hypot(x,y) for x,y in footprint(profile)) + .07
+        return body, swept
 
     def _collect_rotation(self,anchor,deadline):
         from global_scan_matcher import angle_delta
@@ -101,7 +113,9 @@ class AutomaticLocalization:
         if not current or not self._stationary(anchor,current):raise RuntimeError('等待驱动过程中机器人移动或传感器中断，请重试')
         unexpected=[p.node_name for p in b.node.get_publishers_info_by_topic('/cmd_vel') if p.node_name!='jetauto_web_cockpit_gateway']
         if unexpected:raise RuntimeError('检测到其他底盘速度发布者，不能安全执行自动定位旋转')
-        if not self._rotation_clear(anchor['points']):raise RuntimeError('旋转范围 0.43m 内检测到障碍，保持停车')
+        body, swept_radius = self._rotation_envelope()
+        if not self._rotation_clear(current['points'], body, swept_radius):
+            raise RuntimeError(f'旋转范围 {swept_radius:.2f} m 内检测到障碍，保持停车')
         with self.lock:self.state='ROTATING';self.message='静止扫描存在相似候选，正在以 0.10rad/s 原地旋转采集周围环境'
         try:
             b.motion.begin(token,localization=True)
@@ -110,7 +124,8 @@ class AutomaticLocalization:
                 if not current:raise RuntimeError('旋转时激光或底盘 TF 中断，已停车')
                 if current['revision']!=anchor['revision']:raise RuntimeError('旋转时地图改变，已停车')
                 if not b.hardware_ready():raise RuntimeError('旋转时底盘或电池未就绪，已停车')
-                if not self._rotation_clear(current['points']):raise RuntimeError('旋转范围内检测到障碍，已停车')
+                body, swept_radius = self._rotation_envelope()
+                if not self._rotation_clear(current['points'], body, swept_radius):raise RuntimeError('旋转范围内检测到障碍，已停车')
                 if math.hypot(current['odom']['x']-anchor['odom']['x'],current['odom']['y']-anchor['odom']['y'])>.10:
                     raise RuntimeError('原地旋转出现超过 0.10m 的平移，已停车')
                 if current['sequence']!=last_sequence:
@@ -182,7 +197,7 @@ class AutomaticLocalization:
                 if pose['stamp']==last_stamp or current['sequence']==last_sequence:continue
                 last_stamp=pose['stamp'];last_sequence=current['sequence']
                 quality=matcher.assess(pose,current['points'])
-                sample=b.mapping_getter().snapshot(last_revision=current['revision'])
+                sample=b.mapping_getter().snapshot(last_revision=current['revision'], include_scan_points=False)
                 if not self._pose_good(pose,match,quality) or not sample['tf']['robot'] or not sample['tf']['scan']:
                     good=[];stable_start=0;continue
                 if good and (math.hypot(pose['x']-good[0]['x'],pose['y']-good[0]['y'])>.10 or

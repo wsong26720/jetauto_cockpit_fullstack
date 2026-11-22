@@ -14,6 +14,19 @@ import agent_server as server
 
 
 class ApiTests(unittest.TestCase):
+    def test_precheck_explains_inscribed_goal_and_task_cannot_bypass_it(self):
+        from test_navigation import BridgeTests
+        bridge=BridgeTests().bridge();row,_=bridge.mapping_getter().costmaps.raw('global');row['grid']['data'][10]=253
+        self.node.navigation=bridge
+        body={'mode':'single','loop_count':1,'waypoints':[{'id':'blocked','name':'墙边','x':2.5,'y':2.5,'yaw_deg':0}]}
+        response=self.client.post('/api/navigation/precheck',json=body)
+        self.assertEqual(response.status_code,200);self.assertFalse(response.json()['valid'])
+        self.assertEqual(response.json()['targets'][0]['code'],'INSCRIBED_OBSTACLE')
+        self.assertIn('253',response.json()['targets'][0]['message'])
+        response=self.client.post('/api/navigation/task',json=body)
+        self.assertEqual(response.status_code,422);self.assertIn('253',response.json()['detail'])
+        bridge.clients['single'].send_goal_async.assert_not_called()
+
     def test_stop_cleans_owned_children_after_launcher_has_exited(self):
         manager=server.ProcessManager();proc=MagicMock();proc.pid=32145;proc.poll.return_value=None
         proc.wait.side_effect=lambda **kwargs:setattr(proc.poll,'return_value',0)

@@ -1,248 +1,89 @@
-# JetAuto Pro Web 驾驶舱 1.0
+# JetAuto Pro Web 驾驶舱 2.0
 
-发布版本：**1.0.0**。整理日期：2026-11-21。当前功能以本 README 和源码为准，原有分散的部署、导航、自动定位及检查文档已合并。
+通过浏览器驾驶 JetAuto Pro、查看 RGB 和激光、建立二维地图，并在已保存地图上定位和导航。本项目包含网页与车端网关。底盘运动学、电机控制和里程计由厂商驱动负责，全局路径由 Nav2 Theta* 规划，局部轨迹由 DWB 控制器选择。
 
-本项目提供机器人网页控制、遥测、视频、建图观察、保存地图管理、自动定位与 Nav2 导航。网页和网关调用机器人原有 ROS 2 底盘控制栈与 Nav2；没有重写麦轮运动学、电机 PID 或底层固件。
+**适配环境**为 Jetson Orin NX Super、Ubuntu 22.04、ROS 2 Humble、G4 二维激光雷达及 Orbbec Astra Pro Plus。机器人当前配置地址为 `192.168.3.73`，ROS Domain 默认 `3`。更换地址后通过新 IP 访问网页，或在页面连接设置中修改。网关提供驾驶和启动服务的权限，部署在可信局域网内使用。
 
-## 目录
+## 安装、升级与启动
 
-- [平台与访问地址](#平台与访问地址)
-- [功能与限制](#功能与限制)
-- [代码结构与控制链](#代码结构与控制链)
-- [安装部署与启动](#安装部署与启动)
-- [日常操作](#日常操作)
-- [自动定位](#自动定位)
-- [导航参数与控制保护](#导航参数与控制保护)
-- [HTTP 与 WebSocket API](#http-与-websocket-api)
-- [配置与环境变量](#配置与环境变量)
-- [常见问题](#常见问题)
-- [测试与实车验证记录](#测试与实车验证记录)
-- [备份与回退](#备份与回退)
+车端部署目录为 `/home/ubuntu/jetauto_cockpit`。从旧版升级时，先在网页结束任务、停止受管模块，退出网关，再备份当前部署目录。把发布包里的 `backend/`、`frontend/` 和本 README 放入部署目录。保留自己的 `backend/waypoints_store.json` 和地图。已有代价地图配置的用户应合并 `backend/config/nav2_params.yaml` 中自己的参数。2.0 的到点参数在另一个文件 `backend/config/nav2_controller.yaml`，该文件需要一起更新。
 
-## 平台与访问地址
-
-| 项目 | 配置 |
-| --- | --- |
-| 机器人 | 幻尔 JetAuto Pro，麦轮底盘 |
-| 主控 | Jetson Orin NX Super |
-| 系统 | Ubuntu 22.04、ROS 2 Humble |
-| 激光雷达 | YDLIDAR G4 |
-| 深度相机 | Orbbec Astra Pro Plus |
-| 当前默认 IP | `192.168.3.73`，网页优先采用页面所在主机 |
-| ROS Domain | 默认 `3`，网关、rosbridge 和各 ROS 节点必须一致 |
-| 车端项目目录 | `/home/ubuntu/jetauto_cockpit` |
-| 默认地图 | `map_501` |
-| 默认地图目录 | `/home/ubuntu/ros2_ws/src/slam/maps` |
-
-| 服务 | 地址与作用 |
-| --- | --- |
-| 网页 3000 | `http://192.168.3.73:3000/jetauto_pro_cockpit.html` |
-| 网关 8000 | `http://192.168.3.73:8000`，HTTP API 与 WebSocket |
-| 接口调试 | `http://192.168.3.73:8000/docs`；版本信息见 `/openapi.json` |
-| rosbridge 9090 | `ws://192.168.3.73:9090` |
-| 视频 8080 | RGB MJPEG 服务，需要单独启动视频模块 |
-
-当前没有接口认证或 TLS，应在可信局域网使用。页面样式与演示 3D 仍依赖外部 CDN，通信代码在项目内。
-
-## 功能与限制
-
-| 功能 | 当前状态 |
-| --- | --- |
-| 实车连接与遥测 | 默认实车模式，真实 HTTP/WebSocket、ROS 图、电池与硬件指标；缺失或过期数据明确显示未知 |
-| 手动驾驶 | 网关单客户端控制租约、心跳、限速、松手/失焦/断线停车 |
-| 模块启停 | 实际启动/停止受管 ROS 进程，显示 PID、日志及外部进程；组合模块与基础驱动互斥 |
-| RGB 视频 | 8080 MJPEG；失败显示错误并重试，不用演示画面替代 |
-| 2D 地图 | `/map`、按扫描时间对齐的激光、机器人位姿和 `/plan`；支持平移、缩放、适应地图、居中和图层切换 |
-| SLAM 建图 | 启停已有 SLAM 组合模块，网页观察真实建图，手动驾驶扩展地图并保存 |
-| 保存地图管理 | 列表、独立加载、激活、切换、卸载与保存 |
-| 启动自动定位 | 整图激光匹配；必要时低速原地旋转融合扫描；AMCL 验证后开放导航，无需人工标注 |
-| Nav2 任务 | 单点、多点连续经过、逐点驻留与循环、真实反馈、暂停/恢复/取消 |
-| 演示模式 | 独立模拟数据；与实车模式分开 |
-| 尚未接入 | 原始深度图可视化、深度点云避障、实车 3D、代价地图图层、里程计重置、实车快照 |
-
-自动定位可能因对称场景、重复走廊、遮挡或地图变化而失败；系统保持停车，不保证任意环境都能定位成功。当前 footprint 为待实测参数，机械臂伸出后的碰撞外廓未验证。软件测试通过不代表完成实车行驶验收，详见[验证记录](#测试与实车验证记录)。
-
-## 代码结构与控制链
-
-```text
-frontend/
-  jetauto_pro_cockpit.html         网页入口与操作界面
-  cockpit_transport.js            连接、重连、心跳与 HTTP 请求
-  live_map.js                     地图、激光、位姿与路径渲染
-backend/
-  agent_server.py                 FastAPI、遥测、ROS 节点与模块管理
-  control_safety.py               手动租约、导航/定位速度仲裁与超时停车
-  navigation_bridge.py            Action 任务编排、初始定位与就绪检查
-  automatic_localization.py       自动定位、受限原地旋转与验证流程
-  global_scan_matcher.py          全局扫描匹配、候选分差与局部峰形检查
-  mapping_stream.py               地图/激光订阅及时间对齐 TF
-  saved_maps.py                   地图目录与独立地图进程管理
-  saved_map_worker.py             启动并激活独立 map_server
-  cockpit_navigation.launch.py    完整导航组合启动
-  config/nav2_params.yaml         AMCL、规划、代价地图、行为与速度平滑
-  config/nav2_controller.yaml     DWB 全向控制器与速度限制
-  ros_env.sh                     统一 Bash ROS 环境
-  start_cockpit_agent.sh          启动 rosbridge 和网关
-  requirements.txt               Python 依赖
-tests/                           控制、API、定位、地图及浏览器测试
-README.md                        唯一项目说明
-```
-
-手动驾驶：网页 → 网关租约与保护 → `/cmd_vel` → 原有 `controller` 控制栈 → `ros_robot_controller` → 控制板和电机。
-
-自主导航：网页任务 → 网关 Action 客户端 → Nav2 → `/cockpit/nav_raw` → `velocity_smoother` → `/cockpit/nav_cmd_vel` → 网关仲裁/限速 → `/cmd_vel` → 原有底盘控制栈。
-
-定位旋转使用网关独立授权，仅输出零平移及受限角速度。它不依赖尚未完成的 map 定位，也不会接受私有导航速度覆盖定位指令。
-
-## 安装部署与启动
-
-### 依赖
-
-适用于已有厂商 ROS 工作空间和设备规则的机器人。安装 ROS 依赖前先加载正确的软件源：
+车端需要厂商工作空间中的 `controller`、`ros_robot_controller`、`peripherals`、`slam`、机器人模型、G4 和 Orbbec 驱动，以及对应的设备规则。RGB 视频还需能从该 ROS 环境执行 `ros2 run web_video_server web_video_server`。配置好 Humble 软件源后，用以下命令安装通用依赖并启动后端。
 
 ```bash
-sudo apt-get install -y --no-remove \
-  ros-humble-navigation2 ros-humble-nav2-bringup \
-  ros-humble-nav2-theta-star-planner \
-  ros-humble-rosbridge-server python3-numpy python3-scipy
-
+sudo apt-get install -y --no-remove ros-humble-navigation2 ros-humble-nav2-bringup \
+  ros-humble-nav2-theta-star-planner ros-humble-rosbridge-server python3-numpy python3-scipy
 cd /home/ubuntu/jetauto_cockpit
 python3 -m pip install -r backend/requirements.txt
-```
-
-还需要厂商 `controller`、`ros_robot_controller`、`peripherals`、`slam`、机器人模型、雷达与 Orbbec 驱动，以及可运行的 `web_video_server`。Nav2 启动前会检查关键包和设备；仅能导入 ROS 模块不代表驱动齐全。
-
-### 更新已有部署
-
-1. 在网页取消导航/自动定位、停车，停止受管组合模块与视频服务，再在原网关终端 Ctrl+C 退出网关，避免子进程失去管理。
-2. 备份 `/home/ubuntu/jetauto_cockpit`。将本项目完整的 `frontend/`、`backend/` 和 `README.md` 复制到车端对应位置；包括两个 JS、所有 Python、Shell 和 `config/`。保留自己的 `waypoints_store.json` 和配置。
-3. 无需覆盖厂商 `~/ros2_ws`、地图或重新编译厂商包。启动新网关，浏览器 Ctrl+F5 强制刷新。不要同时运行两个网关。
-
-发布包的代码与文档需同步到车端；正在运行的网关版本以 `/openapi.json` 为准。替换后端文件后，需要重新启动网关才能加载新版本。
-
-### 启动服务
-
-终端 1：
-
-```bash
-cd /home/ubuntu/jetauto_cockpit
 ROS_DOMAIN_ID=3 bash backend/start_cockpit_agent.sh
 ```
 
-终端 2（3000 未运行时）：
+第二个终端启动网页：
 
 ```bash
 cd /home/ubuntu/jetauto_cockpit
 python3 -m http.server 3000 --bind 0.0.0.0 --directory frontend
 ```
 
-启动脚本只提供网关和按需启动 rosbridge，不会自动启动硬件驱动。硬件模块从网页启动。当前没有配置开机自启；重启机器人后仍需启动这些服务。
+打开[驾驶舱](http://192.168.3.73:3000/jetauto_pro_cockpit.html)，升级后按 **Ctrl+F5**。页面标题及[网关 OpenAPI](http://192.168.3.73:8000/openapi.json) 的 `info.version` 均应为 `2.0`。
 
-`ros_env.sh` 加载 ROS Humble、厂商 `.typerc` 和 third_party/Orbbec/ros2_ws 的 Bash overlay；厂商 `.robotrc` 含 Zsh 配置，不能直接交给 Bash。网关管理的每个子进程都会加载统一环境，不需要逐一人工 source。
+| 端口 | 服务 | 如何确认 |
+| --- | --- | --- |
+| 3000 | 网页静态文件 | 页面显示实车模式 |
+| 8000 | HTTP 网关、控制和遥测 WebSocket | [健康状态](http://192.168.3.73:8000/api/health) 中检查 `ros_initialized`、`control_ready`、`control_issues` |
+| 9090 | rosbridge | 启动网关时自动启动或复用。已有监听进程须使用相同 ROS Domain |
+| 8080 | `web_video_server` | 在模块管理启动视频服务，再打开 [RGB 视频](http://192.168.3.73:8080/stream?topic=/depth_cam/rgb/image_raw&type=mjpeg&quality=80) |
 
-需要另开 Bash 终端使用 ROS CLI 时，先执行：
-
-```bash
-source /home/ubuntu/jetauto_cockpit/backend/ros_env.sh
-export ROS_DOMAIN_ID=3
-```
+网关和受管子进程通过 `backend/ros_env.sh` 加载 Humble、厂商硬件配置和工作空间。网页启动模块时无需手工逐个 source。另开 Bash 终端查询 ROS 时执行 `source /home/ubuntu/jetauto_cockpit/backend/ros_env.sh`。厂商的 Zsh 配置不适合直接在 Bash 中加载。
 
 ## 日常操作
 
-### 手动驾驶与视频
-
-在实车模式启动“底盘运动与 EKF 控制栈”，需要画面时再启动“深度相机”和“Web 视频流服务”。雷达按需启动。等待底盘控制链、电池和实际传感器数据就绪后操作。
-
-完整底盘使用 `ros2 launch controller controller.launch.py`。单独的 `ros_robot_controller` 是底层板驱动，不能代替 Twist 转换、里程计、EKF 和模型 TF；也不要同时重复启动两套底盘。
-
-RGB 独立检查地址：
-
-```text
-http://192.168.3.73:8080/stream?topic=/depth_cam/rgb/image_raw&type=mjpeg&quality=80
-```
-
-视频 topic 参数需要保留 `/`，本机旧版视频服务不解码 `%2F`。原始 `16UC1` 深度不能直接按 `bgr8` 彩色图转 MJPEG，本版未实现深度可视化。
-
-### 手动驾驶建图
-
-1. 停止导航、独立保存地图服务和单独运行的底盘/相机/雷达模块。
-2. 启动“2D SLAM 在线建图”组合模块；它使用已有 `ros2 launch slam slam.launch.py`，自带基础驱动。
-3. 等待真实 `/map`、`/scan`、里程计和 TF，使用网页手动驾驶逐步扩展地图。
-4. 地图白色为空闲、黑色为障碍、灰色为未知；激光红点按扫描时间变换，车体箭头显示地图位置和朝向。TF 缺失或数据过期时不叠加失效位姿/激光。
-5. 在默认地图目录下指定保存路径，例如 `/home/ubuntu/ros2_ws/src/slam/maps/map_502`，不带扩展名，再保存地图。只有实际保存成功才认为生成文件。
-
-地图拖拽平移、滚轮缩放；“适应地图”显示全图，“居中车体”对准有效机器人位置。地图断开时保留最后底图并标为旧数据，重连后恢复。
-
-### 仅查看保存地图
-
-停止 SLAM/导航和其他 `/map` 发布源，地图名填 `map_501`，点击“加载地图（仅显示）”。后端只启动唯一命名的独立 map_server，并完成 configure → activate；不启动底盘、雷达、相机、AMCL 或导航任务。
-
-单独看底图不要求硬件节点运行，也不表示机器人已定位。结束时停止保存地图服务。进入导航前先卸载该独立地图服务，避免重复 `/map` 发布者。
-
-### 导航
-
-1. 确认地图对应当前环境、底盘带载电压正常，整车和机械臂周围留出旋转空间。
-2. 停止 SLAM、独立保存地图服务和单独底盘/相机/雷达模块，直接启动“Nav2 自主定位与导航”。组合模块包含这些基础驱动，不需要逐个再启动；视频服务可独立运行。
-3. 等待自动定位成功，且页面显示定位、TF 与导航节点已就绪。
-4. “指哪走哪”在地图可通行区域按下并拖出目标朝向，松开即提交单点任务。也可以先拾取/添加站点，选择模式和循环次数后启动任务。
-5. 暂停会取消底层 Action 并等待终态，显示 PAUSED 后才能恢复。恢复重发未完成目标并保留剩余驻留时间；取消不自动恢复。
-
-组合模块包含的子节点可能显示为外部进程，应停止对应的受管组合模块。真正由其他终端启动的外部进程，需在其原终端停止；网关不会接管它。
-
-## 自动定位
-
-默认启动导航后自动定位，无需人点击地图。流程为：等待数据 → 整图搜索 → 必要时原地旋转 → 融合搜索 → AMCL 验证 → 成功或保持停车。
-
-- 使用 `/scan` 和完整 `base_footprint ← lidar_frame` TF，搜索整张地图的 X/Y 与 360° 朝向。粗搜索约 0.20m/10°，精搜索约 0.05m/2°。
-- 检查有效回波、端点命中、射线自由空间和相似候选分差。有效射线至少 60 条、角度覆盖至少 120°；地图上限 100 万格，粗搜索位置上限 12000 个。
-- 静止匹配不足且允许旋转时，以角速度不超过 0.10rad/s 原地转约一圈，按 odom 融合不同朝向扫描，不发送平移速度。
-- 匹配 score 至少 0.68、端点命中比例至少 0.65、自由空间比例至少 0.95、候选分差至少 0.06，并通过局部峰形检查后，才自动发布 `/initialpose`。这些指标不是定位正确概率。
-- 自动初始化协方差根据局部峰形设置，位置方差下限 0.0125m²、偏航方差下限为 5° 的方差。随后通过 `/request_nomotion_update` 请求 AMCL 更新，检查新响应、协方差、扫描一致性和 TF。
-- 验证至少 8 个有效新样本、稳定 3 秒；通过后标为 `initial_pose_source=automatic`。候选已提交但未验证时为 `auto_pending`，仍禁止导航。
-- 旋转最多 85 秒；允许旋转时总定位上限 150 秒，仅静止模式上限 60 秒。失败后保持停车，不会自动反复旋转。
-
-定位旋转遇到急停、低电压、驱动/激光/TF 中断、其他 `/cmd_vel` 发布者、可见旋转包络 0.43m 内障碍、异常平移超过 0.10m 或朝向跳变时停止。指令或条件超过 0.3 秒未更新即输出零速。
-
-0.43m 包络基于当前车体估计和可见激光回波，不能覆盖盲区、机械臂伸出或高于雷达平面的障碍。完全相似场景可能无法唯一定位。启动前留出整车及机械臂旋转空间；匹配验证是保守启发式，不能保证识别所有错误定位。
-
-网页提供“重新自动定位”和“取消自动定位”。手动标注仅作备用：先取消自动定位，在地图按住并拖出实际位置/车头方向，再明确确认。橙色草稿不会自动发布，不能把地图中心当作实际位置。
-
-导航过程中 AMCL 持续更新定位。本版自动全局定位针对启动和显式重试；没有实现定位丢失后自动重定位并恢复原任务的完整流程。
-
-## 导航参数与控制保护
-
-配置在项目 `backend/config/` 和专用 launch 中，保留厂商 navigation 文件。
-
-| 参数 | 当前值 |
+| 任务 | 网页操作 |
 | --- | --- |
-| 时钟 | `use_sim_time=false` |
-| AMCL 运动模型 | `nav2_amcl::OmniMotionModel` |
-| 初始位姿 | `set_initial_pose=false`；由自动定位或可选人工确认发布，不默认设为原点 |
-| TF 主链 | `map → odom → base_footprint → base_link / lidar_frame` |
-| 局部 / 全局代价地图 | `odom` / `map`，车体 frame 为 `base_footprint` |
-| 障碍信息 | `/scan`；局部障碍层/膨胀层，全局增加静态地图层 |
-| 全局规划 / 局部控制 | ThetaStar / DWB 全向控制 |
-| 手动速度上限 | X/Y ±0.20m/s，Yaw ±0.50rad/s |
-| 导航速度上限 | X -0.10～+0.15m/s，Y ±0.10m/s，Yaw ±0.40rad/s |
-| 定位旋转上限 | X/Y 为零，Yaw ±0.10rad/s |
-| 到点容差 | 位置 0.15m，偏航 0.20rad |
-| footprint | 0.50m × 0.44m 矩形，padding 0.02m；仍待实测 |
-| 底盘电池条件 | 样本 5 秒内，电压至少 10.6V |
-| 手动/导航速度超时 | 0.5 秒 |
+| 手动驾驶与看视频 | 在实车模式启动“底盘运动与 EKF 控制栈”。需要视频时再启动深度相机及 Web 视频服务。底盘、电池遥测和控制通道就绪后使用摇杆，松开或页面失焦即停止续发 |
+| 手动驾驶建图 | 停止导航、独立地图服务及分开运行的基础驱动，启动“2D SLAM 在线建图”。等待地图和激光出现，驾车探索，用地图保存按钮输出到允许目录，如 `/home/ubuntu/ros2_ws/src/slam/maps/map_502`，不带扩展名 |
+| 查看已有地图 | 停止其他地图发布源。在地图名称中输入 `map_501`，点击“加载地图（仅显示）”。独立 map_server 激活后即可看底图 |
+| 自动定位与导航 | 卸载独立地图并停止 SLAM 及分开启动的基础驱动。选择地图，启动“Nav2 自主定位与导航”。该组合包含底盘、相机、雷达及导航节点。等待定位和导航就绪，再用“指哪走哪”按下选位置、拖动选朝向、松开提交 |
+| 多站、驻留与恢复 | 在地图拾取站点或输入坐标。连续经过模式使用 `NavigateThroughPoses`。逐站巡航使用连续的 `NavigateToPose`，支持驻留及循环。任务暂停后，等待状态变为 `PAUSED` 才能恢复。开始另一任务前先取消暂停的任务 |
 
-底盘就绪还要求网关初始化成功、`/dev/rrc` 存在、`/cmd_vel` 有实际订阅者及底层板电池发布者。`ok=true` 只表示网关存活；不能替代 `control_ready`、传感器样本和导航 readiness。
+独立底盘启动器是 `ros2 launch controller controller.launch.py`，它提供速度转换、里程计和 EKF。单独启动 `ros_robot_controller` 只启动底层板驱动。若模块显示为“外部进程”，请在其原启动终端或所属组合模块中停止。模拟模式的三维场景及模拟传感器仅供界面演示。实车 RGB 使用 `/depth_cam/rgb/image_raw`，本版的导航避障使用二维 `/scan`，原始 `16UC1` 深度图需要额外的显示转换。
 
-Nav2 接受本网关任务后才开放导航速度；无任务时忽略私有导航速度。导航执行或自动定位期间非零手动请求返回 409。导航中的零速请求会取消导航；取消任务、取消自动定位和软急停会撤销对应速度授权。恢复或解除急停不会自动恢复旧速度。
+## 定位、精度与控制
 
-定位、TF 或就绪条件丢失会阻断速度，持续丢失会取消导航。接收/取消确认超时会保留未确认状态，需成功停止或重启导航后再试。模块停止会撤销控制并发送零速，不会无故新建急停锁。
+**启动定位。** 网关按激光采集时刻查询雷达到底盘的完整 TF。全局搜索使用地图距离场、最多 120 个采样点，依次搜索位置和朝向，再对有明确候选分差的结果做栅格内精修。候选需通过障碍命中、射线经过自由区域、相似候选分差和局部峰形检查。AMCL 接收初始位姿后，网关继续验证至少 8 次独立观测、至少 3 秒的稳定性。地图重复、遮挡或回波稀少时，页面会给出定位失败原因。
 
-软急停只覆盖本网关路径和本网关发起的任务，不能替代硬件急停，也不能阻止外部程序绕过网关直接驱动。深度点云尚未接入避障层，不能依靠本版避让雷达平面之外的障碍。
+**补充扫描。** 标准启动脚本允许低速原地旋转补充扫描，最大角速度 0.10 rad/s。旋转前、旋转中都按运行中的车体外廓、余量及额外 7 cm 间距检查雷达回波。机械臂应处在已测量的行驶姿态。若只允许静止匹配，可在启动网关前设置 `JETAUTO_AUTO_ROTATE=false`。若要人工标注，先取消自动定位，在地图拖出实际车头朝向并确认。2.0 会请求静止 AMCL 更新，等待连续三次稳定更新，并检查与人工标注的偏差是否在 0.20 m、12° 以内再开放任务。
 
-## HTTP 与 WebSocket API
+**跟踪与到点。** 网页保留地图拾取和车体采样的原始坐标、朝向，列表显示时才取整。DWB 进入末端转向的位置窗口与 Nav2 目标检查器统一为 **0.10 m**，目标偏航容差为 **0.08 rad（约 4.6°）**。这是对地图估计位姿的判定。实车地面误差还取决于地图、传感器外参、AMCL 和麦轮打滑。[Humble RotateToGoal 实现](https://api.nav2.org/nav2-humble/html/rotate__to__goal_8cpp_source.html)
 
-基础地址为 `http://<机器人IP>:8000`。坐标单位米，地图参考系 `map`；`yaw_deg` 为逆时针角度。以下坐标仅为字段示例，不是机器人实际目标。
+**控制链。** 手动或导航速度都经过网关仲裁。导航链路为 Nav2 → `/cockpit/nav_raw` → 速度平滑器 → `/cockpit/nav_cmd_vel` → 网关 → `/cmd_vel` → 厂商底盘。位置使用 `map` 坐标；TF 主链为 `map → odom → base_footprint`。网页/API 目标朝向用逆时针度，ROS 角速度用 rad/s。
 
-### HTTP 接口
+| 控制条件 | 默认值 |
+| --- | --- |
+| 手动平移 / 旋转上限 | X、Y 各 ±0.20 m/s，旋转 ±0.50 rad/s |
+| 导航平移 / 旋转上限 | X −0.10～+0.15 m/s，Y ±0.10 m/s，旋转 ±0.40 rad/s |
+| 电池与速度有效期 | 电池至少 10.6 V，样本小于 5 s。速度超时 0.5 s |
+| 导航门槛 | 唯一有效底图、采集时间有效的激光、车体 TF、AMCL 观测、就绪的 Nav2 生命周期和 Action、有效代价地图及外廓 |
+| 接管 | 网关软急停撤销运动授权。解除急停后，需要新的控制输入。外部 ROS 发布者由其自身管理 |
+
+## 代价地图和目标预检查
+
+地图下面的“代价地图参数配置”同时显示保存值和从 ROS 读回的运行值。全局图使用 `map`，局部滚动图使用 `odom`，由 TF 对齐显示。红色 254 表示实际障碍，橙色 253 表示车体中心禁入，紫色 255 表示未知，蓝色 1–252 表示不同程度的通行代价。
+
+| 参数 | 随包默认值 | 作用 |
+| --- | --- | --- |
+| 车体轮廓、余量 | 0.50 × 0.44 m，单侧 0.02 m | 两层共用。按车轮、车身及机械臂收拢后实测外廓填写有序凸多边形 |
+| 膨胀半径、衰减系数 | 0.45 m、3.0 | 全局和局部可分别配置。系数增加会让障碍外围代价更快下降 |
+| 栅格分辨率 | 0.05 m | 全局静态层可采用原始地图分辨率，面板另列实际栅格值 |
+| 雷达标记 / 清障距离 | 6 m / 8 m | 清障距离须大于等于标记距离 |
+
+修改后点击“保存，下次启动生效”。网关校验后原子替换项目的导航 YAML，前一份保存在同目录 `nav2_params.yaml.previous`。在机器人停稳、任务已取消后，停止并重新启动导航模块，等面板读回运行值。保存时出现 409 表示其他页面或程序已经修改配置，需重新读取。
+
+导航预检查同时检查起点、每个目标中心以及目标朝向下带余量的外廓。Nav2 在执行阶段搜索整条路径。即使预检查通过，路径阻塞、定位变化或局部控制失败仍可能导致任务中止。
+
+## HTTP 与 WebSocket
+
+基地址是 `http://<机器人IP>:8000`。完整模型和 HTTP 调试入口见[车端接口文档](http://192.168.3.73:8000/docs)。
 
 | 接口 | 请求与用途 |
 | --- | --- |
@@ -259,184 +100,103 @@ Nav2 接受本网关任务后才开放导航速度；无任务时忽略私有导
 | `POST /api/localization/cancel` | `{}`，取消自动定位并撤销旋转授权 |
 | `POST /api/localization/initialpose` | `{x,y,yaw_deg,confirmed:true}`，备用人工初始位姿 |
 | `GET /api/navigation/status` | 任务、readiness、localization、生命周期、反馈与 ROS 结果 |
-| `POST /api/navigation/task` | `{mode,waypoints,loop_count}`，提交导航任务 |
+| `POST /api/navigation/precheck` | `{mode,waypoints,loop_count}`，只读检查起点和各目标，返回 valid、issues、start、targets，不下发 Action |
+| `GET /api/navigation/costmap-settings` | 返回 settings、revision、runtime、pending_changes、restart_required 和 warnings；运行值缺失时 restart_required 为 null |
+| `POST /api/navigation/costmap-settings` | `{revision,settings}`；只保存本项目导航配置，不改运行节点、不自动重启、不发送运动指令；冲突返回 409，参数无效返回 422 |
+| `POST /api/navigation/task` | `{mode,waypoints,loop_count}`，提交前后端及每次底层 Action 前重复检查 |
 | `POST /api/navigation/pause` | `{}`，关闭速度授权、取消 Action，等终态进入 PAUSED |
 | `POST /api/navigation/resume` | `{}`，PAUSED 且就绪时重发未完成目标 |
 | `POST /api/navigation/cancel` | `{}`，关闭授权并请求取消任务 |
 | `GET /api/waypoints` | 读取后端站点存储，返回 `{waypoints:[...]}` |
 | `POST /api/waypoints` | 请求体为 WaypointItem 数组，保存到 `backend/waypoints_store.json` |
 
-模块 ID：`controller`、`depth_camera`、`lidar`、`slam`、`navigation`、`web_video_server`。
-
-启动导航示例：
+导航模式为 `single`、`through_poses`、`waypoints`。每次 1–100 个点，循环 1–10 次，逐站驻留 0–300 秒。以下请求体可先提交给只读的 `/api/navigation/precheck`。在任务接口使用时应填写现场核对过的坐标。
 
 ```json
-{"module_id":"navigation","action":"start","map_path":"map_501"}
+{"mode":"single","loop_count":1,"waypoints":[{"id":"station-a","name":"A","x":1.2,"y":0.4,"yaw_deg":90,"dwell_sec":0}]}
 ```
 
-`map_path` 为地图名，不含目录和 `.yaml`；网关解析到允许地图目录内的完整 YAML 路径，交给本项目 launch。地图名仅允许字母、数字、下划线和连字符。独立地图服务只操作自己创建的节点，拒绝冲突的外部地图源。
+代价地图配置 POST 的请求体为 `{"revision":"<读取所得哈希>","settings":{...}}`。先 GET 取得完整 `settings`，只变更需要的字段后原样提交。加载地图使用地图名，保存地图使用允许目录内不带扩展名的输出路径。
 
-保存地图示例：
-
-```json
-{"output_path":"/home/ubuntu/ros2_ws/src/slam/maps/map_502"}
-```
-
-必须存在实际 `/map` 发布者，路径必须在 `JETAUTO_MAP_DIR` 内。检查响应 `ok`、returncode 和错误输出。
-
-### 导航任务
-
-```json
-{
-  "mode":"waypoints",
-  "loop_count":1,
-  "waypoints":[
-    {"id":"p1","name":"目标1","x":1.2,"y":-0.4,"yaw_deg":90,"dwell_sec":2}
-  ]
-}
-```
-
-| mode | 执行方式 |
+| WebSocket | 数据 |
 | --- | --- |
-| `single` | 恰好一个点，原生 `/navigate_to_pose`，不执行逐点驻留 |
-| `through_poses` | 原生 `/navigate_through_poses` 连续经过点列，不执行每点 dwell |
-| `waypoints` | 网关逐点调用 `/navigate_to_pose`，成功后驻留，支持循环 |
+| `/ws/telemetry` | 约 1 Hz 推送健康状态、硬件、电池、任务反馈和模块列表 |
+| `/ws/mapping` | 约 10 Hz 推送地图状态、扫描、位姿和路径。底图、全局和局部代价栅格按各自修订号传输 |
+| `/ws/control` | 发送 `{linear_x,linear_y,angular_z}`，读取就绪或拒绝原因。断开撤销该客户端的手动租约 |
 
-逐点模式未调用原生 `/follow_waypoints`，用于支持不同驻留时间及恢复进度。点数 1～100，循环次数 1～10，dwell_sec 0～300 秒。坐标必须有限，目标须位于地图已知、占用值小于 65 的栅格；该检查不替代路径可达性或足迹碰撞判断。
+## 配置、源码与排查
 
-提交成功返回 `{ok:true,task_id,state:"pending"}`，只表示已提交；真实接收、执行和结果以反馈为准。任务上下文在内存中，网关重启不恢复旧任务，需要重新完成定位。
-
-`status_text`：IDLE、PENDING、EXECUTING、DWELLING、CANCELING、PAUSED、CANCELED、SUCCEEDED、ABORTED。PAUSED 与 CANCELED 的 status_code 都为 5，需同时读取 paused/status_text。`ros_result_status` 为底层结果：4 成功、5 取消、6 中止。
-
-反馈含 distance_remaining（米）、estimated_time_remaining/navigation_time（秒）、number_of_recoveries、从 0 开始的 current_waypoint_index、从 1 开始的 current_loop、dwell_remaining 和 waypoints。ETA 为 0 可能表示暂无估计；恢复次数与耗时以当前底层 Action 为单位。
-
-网页站点编辑为本地草稿与 JSON 导出，不自动持久化到站点 API。暂停实现为取消并重发，不是冻结 Nav2 内部状态。
-
-### 定位状态与备用手动位姿
-
-`localization` 阶段：IDLE、WAITING、MATCHING、ROTATING、VERIFYING、SUCCEEDED、FAILED、CANCELED；包含 message/error、rotation_allowed、rotation_degrees、elapsed_sec 与 match。`control.source=localization` 表示定位旋转占用控制权。
-
-`readiness.initial_pose_source` 为 automatic、auto_pending 或 manual；`initial_pose_confirmed` 同时表示自动验证通过或人工确认，不要求人点击。
-
-备用初始位姿示例：
-
-```json
-{"x":1.2,"y":-0.4,"yaw_deg":90,"confirmed":true}
-```
-
-AMCL 必须 active，点需可通行且无自动定位、活动导航或手动租约。人工初始化位置方差为 0.25m²，偏航为 15° 的方差，返回 waiting_for_amcl，不能立即视为定位成功。
-
-### WebSocket 与错误
-
-| 通道 | 内容 |
+| 位置 | 负责内容 |
 | --- | --- |
-| `WS /ws/control` | 有序手动控制消息 `{linear_x,linear_y,angular_z}`；服务端回复 ready/成功/错误，断开撤销自己的租约 |
-| `WS /ws/telemetry` | 每秒推送 health 字段及 launches 列表 |
-| `WS /ws/mapping` | 只读地图通道，修订变化时推送 map，激光/位姿约 10Hz，附 TF 和数据状态 |
+| `frontend/jetauto_pro_cockpit.html` | 页面、地图选点、任务与模块交互 |
+| `frontend/cockpit_transport.js`、`live_map.js`、`costmap_settings.js` | 连接与心跳、地图栅格渲染、参数表单 |
+| `backend/agent_server.py`、`control_safety.py` | HTTP/WebSocket、进程管理、遥测及速度仲裁 |
+| `backend/navigation_bridge.py`、`automatic_localization.py`、`global_scan_matcher.py` | Action 生命周期、初始位姿验证、激光匹配 |
+| `backend/mapping_stream.py`、`costmap_stream.py`、`costmap_settings.py`、`navigation_precheck.py` | 地图与 TF 采样、参数持久化、外廓检查 |
+| `backend/saved_maps.py`、`saved_map_worker.py` | 已保存地图目录和独立 map_server 生命周期 |
+| `backend/cockpit_navigation.launch.py`、`backend/config/` | Nav2 节点组合，AMCL、Theta*、DWB、代价地图与平滑器参数 |
+| `tests/` | Python 单元/API 测试、地图数学和浏览器操作回归 |
 
-地图结构含 width、height、resolution、origin、data、frame_id；扫描点已变换到地图坐标。`/plan` 仅发送 frame 匹配、最近 3 秒内的折线。图层未接入时保持禁用。
+`JETAUTO_WS`、`THIRD_PARTY_WS` 和 `ORBBEC_WS` 指定厂商及外设工作空间。`JETAUTO_MAP_DIR` 默认取 `$JETAUTO_WS/src/slam/maps`。`JETAUTO_AGENT_PORT` 可覆盖 8000。`JETAUTO_AUTO_LOCALIZATION=false` 关闭启动时自动定位，仍可从网页主动请求。网页样式和演示 3D 使用外部 CDN。
 
-常见 HTTP 错误：409 控制/模块/地图冲突或未就绪，423 急停，422 参数或位置无效，404 地图不存在，503 驱动/包/服务不可用，504 等待超时。ROS Action 字段以机器上的 Humble 接口和 [Nav2 Humble 文档](https://api.nav2.org/humble/actions/navigation/)为准。
-
-## 配置与环境变量
-
-| 环境变量 | 默认值/用途 |
-| --- | --- |
-| `ROS_DOMAIN_ID` | `3`，统一所有 ROS 进程 |
-| `JETAUTO_WS` | `~/ros2_ws` |
-| `THIRD_PARTY_WS` | `~/third_party/third_party_ws` |
-| `ORBBEC_WS` | `~/third_party/orbbec_ws` |
-| `JETAUTO_MAP_DIR` | `$JETAUTO_WS/src/slam/maps` |
-| `JETAUTO_AGENT_PORT` | `8000` |
-| `JETAUTO_AUTO_LOCALIZATION` | 默认 true；false 关闭自动触发，仍可通过 API 主动请求 |
-| `JETAUTO_AUTO_ROTATE` | 标准启动脚本默认 true；直接运行 Python 未设置时默认 false |
-| `COCKPIT_BROWSER_EXE` | 测试时指定已有 Chrome/Edge 可执行文件 |
-
-强制仅静止定位可这样启动：
+在车端打开单独的终端并加载 `backend/ros_env.sh` 后，可用下面的只读命令区分地图、定位、雷达与目标执行的问题。
 
 ```bash
-ROS_DOMAIN_ID=3 JETAUTO_AUTO_ROTATE=false bash backend/start_cockpit_agent.sh
-```
-
-启动脚本会复用已有 9090 监听者，需自行确认其 Domain；不会替换外部 rosbridge。
-
-## 常见问题
-
-| 现象 | 处理 |
-| --- | --- |
-| 网页在线但无法控制 | 查看 control_issues、`/dev/rrc`、实际底盘订阅者、电池新鲜度和急停；仅有话题名称或 odom 节点不代表底层板工作 |
-| 视频黑屏/8080 拒绝连接 | 启动相机和视频模块，查看实际 RGB 发布者；先单独打开 RGB URL |
-| `16UC1` 转 `bgr8` 报错 | 原始深度不是彩色图，本版禁用该视频入口 |
-| `bad substitution`、`cd: -q` | Bash 中加载了 Zsh 配置；使用项目 ros_env.sh |
-| 地图一直等待 `/map` | 检查发布者；仅看底图使用独立加载，建图/导航检查模块、依赖和生命周期激活 |
-| 缺少 map → base_footprint | SLAM 或定位尚未建立全局 TF；导航先等待自动定位完成 |
-| 等待扫描时刻 TF | 检查雷达时间戳、真实时钟和 odom/模型/地图 TF 链 |
-| 激光或电池样本过期 | 检查对应驱动、USB、供电和 Domain |
-| 自动定位失败/相似候选 | 查看定位消息，确认地图对应现场、雷达无遮挡；留出旋转空间后重试，失败时不猜测位置 |
-| 低电压停止旋转 | 处理底盘电池/实际供电；静止电压回升不表示带载正常，不要绕过 10.6V 门禁 |
-| planner_server 显示 0/未激活 | 等待全局 TF 的激活回调可能使查询超时；先处理定位，不等同于缺包 |
-| 模块冲突或外部进程 | 停止对应组合模块或原启动终端的进程，避免重复驱动/地图发布者 |
-| 更新后状态仍旧 | 完整更新前后端、重启网关并 Ctrl+F5；单独替换 HTML 不够 |
-
-只读排查（新 Bash 终端先 source 统一环境）：
-
-```bash
-ros2 node list
-ros2 topic info /cmd_vel -v
 ros2 topic info /map -v
-ros2 topic info /scan -v
-ros2 topic info /depth_cam/rgb/image_raw -v
+ros2 topic hz /scan
+ros2 run tf2_ros tf2_echo map base_footprint
+ros2 lifecycle get /amcl
+ros2 action info /navigate_to_pose
+ros2 param get /controller_server general_goal_checker.yaw_goal_tolerance
 ```
 
-车端网关日志通常为 `/home/ubuntu/jetauto_cockpit/logs/gateway.log`，静态服务日志为同目录 `frontend.log`；按需启动的 rosbridge 日志为 `/tmp/rosbridge_9090.log`。手动在终端启动时以终端输出为准。
+| 现象 | 检查位置 |
+| --- | --- |
+| 网页能开，模块或驾驶按钮不可用 | 确认“实车直连”、IP、8000 和 9090。看 `/api/health` 的具体原因，再检查 `/dev/rrc`、`/cmd_vel` 订阅者、电池与急停 |
+| 一直等待真实地图或激光 TF | 检查 `ros2 topic info /map -v`、`ros2 topic info /scan -v`、ROS Domain 和消息时钟。保留一个地图发布源，确认雷达设备 `/dev/lidar` |
+| 全局定位相似候选过多 | 核对地图和雷达视野，在特征明显的位置重试，或确认一次人工位姿。定位期间查看页面给出的 AMCL 与扫描匹配状态 |
+| ROS 状态 6（ABORTED） | 先读任务错误和预检查原因。253 表示离障碍太近。若起终点通过，检查 `planner_server`、`controller_server` 日志、路径及局部代价图 |
+| 保存配置后运行值仍未知 | 检查受管导航是否启动和参数服务是否可读；对比 `global_costmap`、`local_costmap` 的运行值 |
+| 地图在前端变了，版本或功能仍旧 | 检查 `/openapi.json`，重启更新后的网关并强制刷新网页。回退时停受管模块、停网关，恢复升级前项目备份后重启 |
 
-## 测试与实车验证记录
+## 验证与已知边界
 
-### 本地测试
+2.0 已通过 87 项 Python 测试、地图几何测试，以及手动控制、视频、地图、导航、代价预检查和参数配置的浏览器操作测试。回归覆盖迟到的代价图响应、重复底图、过期激光、移动后的 AMCL 观测和人工标注一致性。
+
+在开发机上，用同一张 5 cm 非对称合成地图生成 12 个已知位姿的扫描，对 1.0.2 与 2.0 分别执行全局定位。两版都接受了 12 个位姿。以下为这一组样本的中位数：
+
+| 指标 | 1.0.2 | 2.0 |
+| --- | ---: | ---: |
+| 初始位置误差 | 1.85 cm | 1.18 cm |
+| 初始朝向误差 | 0.48° | 0.12° |
+| 建立匹配器并完成一次搜索 | 196 ms | 146 ms |
+
+在 Jetson 上以独立 ROS Domain（87 或 88）、回环网络、真实 Humble Nav2 和模拟底盘运行闭环测试。雷达观测由地图光线投射生成，模拟底盘按网关输出速度积分。人工给定起点后，在每张图上向相距 0.8 m、朝向 24° 的目标导航。下表记录各条件下一次成功任务结束时，目标与模拟底盘真值的偏差。
+
+| 地图 | 调整前，朝向容差 0.15 rad | 发布配置，朝向容差 0.08 rad |
+| --- | --- | --- |
+| 非对称合成房间 | 8.3 cm，8.9° | 4.7 cm，4.7° |
+| 已保存地图 `map_501` | 24.7 cm，8.8° | 27.3 cm，4.5° |
+
+这两次对照都观察到了终点朝向改善。`map_501` 的位置误差仍较大。开发过程中的一次早期模拟使用了不同的地图边界射线处理，位置误差达到 37 cm。两组导航试验每个条件只有一个样本，无法据此判定真实车辆的位置精度有改善。
+
+在 `map_501` 使用静止自动定位时，前两名候选分差仅为 0.009，低于接受阈值 0.06。网关提示环境有相似位置，保持未定位状态。该试验关闭了补充旋转。隔离测试期间也观察到连续重启后地图服务配置偶发超时，更换隔离 Domain 重试后通过。若车端启动后一直未就绪，可先检查地图发布者和两个生命周期管理器的日志。
+
+渲染复用代价图画布、像素缓冲及调色表。导航就绪检查只查询扫描时刻的 TF，绘图时才投影激光点。搜索分批处理候选位姿以限制临时数组大小。上述计时是开发机匹配耗时，网页帧率、Jetson 算力余量及真实地面行驶误差尚无对比测量。
+
+在开发机安装测试依赖后执行：
 
 ```bash
 python3 -m pip install -r tests/requirements.txt
-python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s tests
+node tests/test_map_math.js
 python3 -m playwright install chromium
 python3 tests/browser_smoke.py
 python3 tests/browser_mapping.py
 python3 tests/browser_navigation.py
 COCKPIT_BROWSER_AUTO_TEST=1 python3 tests/browser_navigation.py
-node tests/test_map_math.js
-node --check frontend/cockpit_transport.js
-node --check frontend/live_map.js
-bash -n backend/start_cockpit_agent.sh
-bash -n backend/ros_env.sh
+COCKPIT_BROWSER_COSTMAP_TEST=1 python3 tests/browser_navigation.py
+python3 tests/browser_costmap_settings.py
 ```
 
-最近完成 51 项 Python 测试，以及原控制/视频、地图、备用手动定位/导航、自动定位进度/重试/取消的浏览器测试。浏览器测试拦截实际机器人连接，不驱动机器人。
-
-另在机器人 ROS Domain 42 使用真实 Nav2 与合成传感器、不启动硬件驱动，验证了未知位置自动定位、对称场景拒绝、仅前向扫描配合约 358.7° 旋转融合定位、全部节点 active、目标接收/反馈、暂停/恢复/取消、逐点驻留循环和速度限制。合成测试不证明实车定位或行驶精度。
-
-### 实机检查历史
-
-| 日期 | 有效结论 |
-| --- | --- |
-| 2026-11-12 | 修复真实 API/遥测连接、视频 topic 斜杠兼容、Bash/Zsh 环境、控制租约、超时零速、按钮更新与停止模块自动加锁问题；另发现 USB/供电导致设备缺失 |
-| 2026-11-15 | 补齐 Nav2 依赖，新增 51 包、升级 1 包、无移除；检查时主组件版本为 1.1.20。验证地图、RGB、odom/车体/雷达 TF、关键参数及私有速度路由；保留厂商导航包和地图 |
-| 2026-11-21 | 自动定位代码部署。实车完成约 358.6° 旋转，融合匹配 score 约 0.865、候选分差约 0.202；当时 AMCL 沿墙不确定度较大，保持门禁，随后分离自动/人工初始化协方差 |
-| 2026-11-21 最终复测 | 修正后完整启动，旋转约 12.5° 时带载电压降到约 10.6V，保护停车；记录平移速度全为零、角速度不超过 0.10rad/s、最后指令零速。最终版本的实车定位成功和导航行驶验收尚未完成 |
-
-检查记录是历史采样，不代表机器人当前实时状态。原网页/RGB及地图 119 × 129 已确认可用；当前有效回波主要在前方约 170°。实测 base_footprint 到 lidar_frame 静态位移约 `(0.09594,-0.00001,0.12840)m`、四元数 `(0,0,0,1)`。地图大小与射线数量可能随地图或配置改变。
-
-安装时还发现无关 Intel RealSense 软件源缺少公钥 `FB0B24895113F120`；ROS/Ubuntu 安装成功，没有修改该无关源。深度点云避障、机械臂外廓与实车最终定位/行驶精度仍待验证。
-
-## 备份与回退
-
-已有车端备份：
-
-- `/home/ubuntu/jetauto_cockpit_backups/20261115-205223`：cockpit、厂商 navigation、地图和原 dpkg 清单。
-- `/home/ubuntu/jetauto_cockpit_backups/20261121-auto-localization/cockpit_before.tgz`：自动定位修改前项目。
-
-原始检查证据保留在项目之外，主要目录为：
-
-- `C:/Users/kiefer_k/Desktop/navi/output/cockpit-review-2026-11-12`
-- `C:/Users/kiefer_k/Desktop/navi/output/cockpit-deployed-check-20261112-152531`
-- `C:/Users/kiefer_k/Desktop/navi/output/nav2-completion-2026-11-15`
-- `C:/Users/kiefer_k/Desktop/navi/output/auto-localization-2026-11-21`
-
+旧版已在此车上验证 RGB、地图、代价图和导航目标拒绝原因。2.0 的实车地面验收应以独立测量为准：在标记点记录目标位置与车头角度，多次从不同方向抵达，用实测终点计算位置和朝向误差。机械臂伸出后的轮廓、麦轮地面滑移和雷达平面之外的障碍仍需现场核对。

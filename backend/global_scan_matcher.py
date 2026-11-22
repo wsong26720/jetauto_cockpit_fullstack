@@ -11,10 +11,14 @@ def angle_delta(a,b):
 class GlobalScanMatcher:
     def __init__(self,grid):
         self.grid=grid;self.res=float(grid['resolution'])
+        if grid['width'] * grid['height'] > 1_000_000:
+            raise ValueError('地图超过自动定位的 100 万格上限')
         self.a=np.asarray(grid['data'],dtype=np.int16).reshape(grid['height'],grid['width'])
-        if self.a.size>1_000_000:raise ValueError('地图超过自动定位的 100 万格上限')
         if not np.any(self.a>=65):raise ValueError('地图缺少已知障碍，无法自动定位')
         self.distance=distance_transform_edt(self.a<65)*self.res
+        # Each beam repeatedly hits the same cells across thousands of poses.
+        self.likelihood = {sigma: np.exp(-0.5 * (self.distance / sigma)**2)
+                           for sigma in (.25, .12)}
         self.clearance=distance_transform_edt(np.pad((self.a>=0)&(self.a<20),1))[1:-1,1:-1]*self.res
         o=grid['origin'];q=o['orientation'];p=o['position']
         self.ox=p['x'];self.oy=p['y']
@@ -29,7 +33,8 @@ class GlobalScanMatcher:
         angles=np.arctan2(p[:,1],p[:,0]);sectors=np.unique(np.floor((angles+math.pi)/(math.pi/4)).astype(int)%8)
         ordered=np.sort(angles);coverage=2*math.pi-float(np.max(np.diff(np.r_[ordered,ordered[0]+2*math.pi])))
         if len(sectors)<3 or coverage<math.radians(120):raise ValueError('有效激光覆盖角度不足 120°，请检查雷达遮挡')
-        return p[::max(1,math.ceil(len(p)/120))]
+        indices = np.linspace(0, len(p), min(len(p), 120), endpoint=False, dtype=int)
+        return p[indices]
 
     def _evaluate(self,poses,points,sigma):
         poses=np.asarray(poses,dtype=float)
@@ -40,8 +45,37 @@ class GlobalScanMatcher:
         ix=np.floor(x/self.res).astype(int);iy=np.floor(y/self.res).astype(int)
         valid=(ix>=0)&(iy>=0)&(ix<self.a.shape[1])&(iy<self.a.shape[0])
         clipped_x=np.clip(ix,0,self.a.shape[1]-1);clipped_y=np.clip(iy,0,self.a.shape[0]-1)
-        d=self.distance[clipped_y,clipped_x]
-        return (np.exp(-.5*(d/sigma)**2)*valid).mean(axis=1)
+        return (self.likelihood[sigma][clipped_y, clipped_x] * valid).mean(axis=1)
+
+    def _refine_peak(self, pose, points):
+        # Search below the 5 cm / 2 degree refinement grid. Interpolate the
+        # likelihood at cell centres so sub-cell shifts change the objective.
+        step = min(.025, self.res / 2)
+        offsets = np.array([(x * step, y * step, math.radians(a))
+                            for x in (-1, 0, 1) for y in (-1, 0, 1) for a in (-1, 0, 1)])
+        best = pose
+        field = self.likelihood[.12]
+        h, w = field.shape
+        for scale in (1., .5):
+            candidates = best + offsets * scale
+            gx, gy = np.floor(candidates[:, :2] / self.res).astype(int).T
+            valid = (gx >= 0) & (gx < w) & (gy >= 0) & (gy < h)
+            candidates = candidates[valid & (self.clearance[gy.clip(0,h-1), gx.clip(0,w-1)] >= .25)]
+            c, s = np.cos(candidates[:, 2:3]), np.sin(candidates[:, 2:3])
+            x = (candidates[:, 0:1] + c*points[:, 0] - s*points[:, 1]) / self.res - .5
+            y = (candidates[:, 1:2] + s*points[:, 0] + c*points[:, 1]) / self.res - .5
+            ix, iy = np.floor(x).astype(int), np.floor(y).astype(int)
+            fx, fy = x-ix, y-iy
+            scores = np.zeros(len(candidates))
+            for dx, wx in ((0, 1-fx), (1, fx)):
+                for dy, wy in ((0, 1-fy), (1, fy)):
+                    xx, yy = ix+dx, iy+dy
+                    valid = (xx >= 0) & (xx < w) & (yy >= 0) & (yy < h)
+                    scores += (wx*wy*valid*field[yy.clip(0,h-1), xx.clip(0,w-1)]).sum(axis=1)
+            # Retain the centre on a flat peak.
+            tied = np.flatnonzero(np.isclose(scores, scores.max(), rtol=0, atol=1e-10))
+            best = candidates[tied[np.argmin(np.linalg.norm(candidates[tied] - best, axis=1))]]
+        return best
 
     @staticmethod
     def _distinct(candidates,limit):
@@ -61,7 +95,11 @@ class GlobalScanMatcher:
         candidates=[]
         for yaw in np.arange(-math.pi,math.pi,math.radians(10)):
             if canceled():raise InterruptedError('自动定位已取消')
-            poses=np.column_stack((xy,np.full(len(xy),yaw)));scores=self._evaluate(poses,p,.25)
+            poses=np.column_stack((xy,np.full(len(xy),yaw)))
+            scores = np.empty(len(poses))
+            for begin in range(0, len(poses), 512):
+                if canceled():raise InterruptedError('自动定位已取消')
+                scores[begin:begin+512] = self._evaluate(poses[begin:begin+512], p, .25)
             top=np.argsort(scores)[-min(100,len(scores)):]
             candidates.extend((float(scores[i]),poses[i]) for i in top)
         seeds=self._distinct(candidates,16);refined=[]
@@ -78,12 +116,18 @@ class GlobalScanMatcher:
         ranked=self._distinct(refined,16)
         if not ranked:raise ValueError('无法找到可用的地图匹配候选')
         score,best=ranked[0];runner_up=ranked[1][0] if len(ranked)>1 else 0.
+        coarse_best = best
+        if score >= .68 and score - runner_up >= .06:
+            candidate = self._refine_peak(best, p)
+            quality = self.assess_grid_pose(candidate, p)
+            if quality['hit_ratio'] >= .65 and quality['free_ratio'] >= .95:
+                best = candidate
         result=self.assess_grid_pose(best,p)
         c=math.cos(self.oyaw);s=math.sin(self.oyaw)
         result.update(x=self.ox+c*best[0]-s*best[1],y=self.oy+s*best[0]+c*best[1],
                       yaw_deg=math.degrees(angle_delta(best[2]+self.oyaw,0)),score=score,
                       runner_up_score=runner_up,margin=score-runner_up,beams=len(p))
-        neighborhood=best+offsets
+        neighborhood=coarse_best+offsets
         local_scores=self._evaluate(neighborhood,p,.12)
         near=neighborhood[local_scores>=max(score-.03,.65)]
         if len(near):

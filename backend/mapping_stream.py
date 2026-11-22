@@ -17,15 +17,21 @@ def stamp_seconds(stamp):
     return stamp.sec + stamp.nanosec * 1e-9
 
 
+def valid_rotation_norm(translation, rotation):
+    coordinates = (translation.x, translation.y, translation.z)
+    norm = math.hypot(rotation.x, rotation.y, rotation.z, rotation.w)
+    if not all(math.isfinite(v) for v in coordinates) or not math.isfinite(norm) or abs(norm-1) > .01:
+        raise ValueError("TF 位移或四元数无效")
+    return norm
+
+
 def scan_points(scan, transform):
     """Project valid rays using the full 3D lidar-to-map rigid transform.
 
     Roll/pitch must not be discarded: some mounted lidars are inverted.
     """
     t, q = transform.translation, transform.rotation
-    norm = math.sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w)
-    if not math.isfinite(norm) or norm < 1e-9:
-        raise ValueError("无效 TF 四元数")
+    norm = valid_rotation_norm(t, q)
     x, y, z, w = q.x/norm, q.y/norm, q.z/norm, q.w/norm
     r00, r01 = 1-2*(y*y+z*z), 2*(x*y-z*w)
     r10, r11 = 2*(x*y+z*w), 1-2*(x*x+z*z)
@@ -70,6 +76,10 @@ class MappingFeed:
         self.map_sub = node.create_subscription(OccupancyGrid, "/map", self.on_map, map_qos)
         self.scan_sub = node.create_subscription(LaserScan, "/scan", self.on_scan, qos_profile_sensor_data)
         self.plan_sub = node.create_subscription(Path,"/plan",self.on_plan,10)
+        from costmap_stream import CostmapFeed
+        self.costmap_error=None
+        try:self.costmaps=CostmapFeed(node,clock)
+        except ImportError as exc:self.costmaps=None;self.costmap_error='代价地图组件不可用：'+str(exc)
 
     def on_plan(self,msg):
         count=len(msg.poses);step=max(1,math.ceil(count/5000))
@@ -81,10 +91,14 @@ class MappingFeed:
         info = msg.info
         size = info.width * info.height
         p, q = info.origin.position, info.origin.orientation
-        origin_valid = all(math.isfinite(v) for v in (p.x,p.y,p.z,q.x,q.y,q.z,q.w)) and q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w > 1e-12
+        try:
+            valid_rotation_norm(p, q)
+            origin_valid = True
+        except ValueError:
+            origin_valid = False
         if not size or size > 16_000_000 or size != len(msg.data) or not math.isfinite(info.resolution) or info.resolution <= 0 or not origin_valid:
             with self.lock:
-                self.map_error = "地图尺寸/分辨率无效，或超过 1600 万格显示上限"
+                self.map_error = "地图原点、尺寸或分辨率无效，或超过 1600 万格显示上限"
             return
         frame = msg.header.frame_id.lstrip("/")
         if not frame:
@@ -96,10 +110,16 @@ class MappingFeed:
                 "origin": {"position": xyz(info.origin.position), "orientation": quaternion(info.origin.orientation)},
                 "data": list(msg.data)}
         with self.lock:
+            previous = self.grid
+            if previous and all(previous[k] == grid[k] for k in ('frame_id','width','height','resolution','origin','data')):
+                self.map_received = self.clock()
+                self.map_error = None
+                return
             self.grid = grid
             self.revision += 1
             self.map_received = self.clock()
             self.map_error = None
+            if getattr(self,'costmaps',None):self.costmaps.reset()
 
     def on_scan(self, msg):
         with self.lock:
@@ -110,6 +130,8 @@ class MappingFeed:
     def localization_input(self):
         """Map and scan in base coordinates, independent of the missing map TF."""
         with self.lock:
+            if self.map_error:
+                return None
             grid=self.grid;revision=self.revision;scans=list(self.scans)
         if not grid or self.node.count_publishers('/map')!=1:return None
         now=self.clock();ros_now=self.node.get_clock().now().nanoseconds*1e-9
@@ -121,6 +143,7 @@ class MappingFeed:
                 t=self.buffer.lookup_transform(self.base_frame,scan.header.frame_id.lstrip('/'),at)
                 o=self.buffer.lookup_transform('odom',self.base_frame,at).transform
                 q=o.rotation
+                valid_rotation_norm(o.translation, q)
                 return {'grid':grid,'revision':revision,'sequence':sequence,
                         'points':scan_points(scan,t.transform),
                         'odom':{'x':o.translation.x,'y':o.translation.y,
@@ -128,7 +151,7 @@ class MappingFeed:
             except (self.TransformException,ValueError):continue
         return None
 
-    def snapshot(self, last_revision=None):
+    def snapshot(self, last_revision=None, costmap_revisions=None, *, include_scan_points=True):
         now = self.clock()
         with self.lock:
             grid, revision = self.grid, self.revision
@@ -142,6 +165,19 @@ class MappingFeed:
                    "scan_age_sec": None if scan_received is None else round(now-scan_received, 2),
                    "pose": None, "scan": None, "tf": {"robot": False, "scan": False, "issues": issues}}
         payload['plan']={'frame_id':frame,'points':plan['points'],'age_sec':round(now-plan['received'],3)} if plan and plan['frame_id']==frame and now-plan['received']<3 else None
+        def resolve(source):
+            tf=self.buffer.lookup_transform(frame,source,self.Time())
+            stamp=stamp_seconds(tf.header.stamp)
+            ros_now=self.node.get_clock().now().nanoseconds*1e-9
+            if stamp and not -1.1 <= ros_now-stamp <= 2:
+                raise ValueError(frame+' ← '+source+' TF 已过期或时钟不同步')
+            t=tf.transform.translation;q=tf.transform.rotation
+            valid_rotation_norm(t, q)
+            return {'x':t.x,'y':t.y,'yaw':math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))}
+        costs=getattr(self,'costmaps',None)
+        payload['costmaps']=costs.snapshot(frame,resolve,costmap_revisions) if costs else {
+            name:{'available':False,'fresh':False,'aligned':False,'issue':getattr(self,'costmap_error',None) or '等待代价地图组件','revision':0}
+            for name in ('global','local')}
         if grid is not None and revision != last_revision:
             payload["map"] = grid
         if grid is None:
@@ -149,24 +185,31 @@ class MappingFeed:
             return payload
         if map_error:
             issues.append(map_error)
-        if self.node.count_publishers('/map') == 0:
+        publishers = self.node.count_publishers('/map')
+        payload['map_valid'] = publishers == 1 and not map_error
+        if publishers == 0:
             issues.append('当前没有 /map 发布者，底图为最后收到的地图')
+        elif publishers > 1:
+            issues.append('存在多个 /map 发布者，请选择唯一地图源')
         try:
             tf = self.buffer.lookup_transform(frame, self.base_frame, self.Time())
             tf_stamp = stamp_seconds(tf.header.stamp)
             ros_now = self.node.get_clock().now().nanoseconds * 1e-9
             # Static transforms can have stamp 0; live robot pose must be dynamic.
-            age = max(0, ros_now - tf_stamp)
-            if tf_stamp <= 0 or age > 2:
+            age = ros_now - tf_stamp
+            if tf_stamp <= 0 or not -1.1 <= age <= 2:
                 issues.append("机器人 TF 已过期，等待实时 " + frame + " → " + self.base_frame)
             else:
                 t, q = tf.transform.translation, tf.transform.rotation
+                valid_rotation_norm(t, q)
                 payload["pose"] = {"x": t.x, "y": t.y,
                     "yaw": math.atan2(2*(q.w*q.z+q.x*q.y), 1-2*(q.y*q.y+q.z*q.z)),
                     "stamp": tf_stamp, "age_sec": round(age, 3)}
                 payload["tf"]["robot"] = True
         except self.TransformException:
             issues.append("缺少机器人 TF：" + frame + " → " + self.base_frame)
+        except ValueError as exc:
+            issues.append(str(exc))
         if not scans or now - scans[-1][1] > 2:
             issues.append("等待 /scan" if not scans else "激光扫描已过期")
             return payload
@@ -181,10 +224,18 @@ class MappingFeed:
                 scan_error = "激光 frame_id 为空"
                 continue
             try:
+                stamp = stamp_seconds(scan.header.stamp)
+                acquisition_age = self.node.get_clock().now().nanoseconds * 1e-9 - stamp
+                if stamp <= 0 or not -.1 <= acquisition_age <= 1:
+                    scan_error = '激光采集时间已过期或时钟不同步'
+                    continue
                 tf = self.buffer.lookup_transform(frame, source, self.Time.from_msg(scan.header.stamp))
-                payload["scan"] = {"sequence": sequence, "source_frame": source, "frame_id": frame,
-                                   "stamp": stamp_seconds(scan.header.stamp), "age_sec": round(now-received, 3),
-                                   "points": scan_points(scan, tf.transform)}
+                if include_scan_points:
+                    payload["scan"] = {"sequence": sequence, "source_frame": source, "frame_id": frame,
+                                       "stamp": stamp, "age_sec": round(max(acquisition_age, now-received), 3),
+                                       "points": scan_points(scan, tf.transform)}
+                else:
+                    valid_rotation_norm(tf.transform.translation, tf.transform.rotation)
                 payload["tf"]["scan"] = True
                 return payload
             except self.TransformException:

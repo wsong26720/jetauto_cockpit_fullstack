@@ -23,6 +23,7 @@
       this.zero();
       this.epoch++;
       clearTimeout(this.retry);
+      this.retry = null;
       this.sockets.forEach(s => s.close());
       this.sockets = [];
       this.controlSocket = null;
@@ -96,7 +97,10 @@
         if (epoch !== this.epoch) return;
         try {
           const data = JSON.parse(e.data);
-          if (data.type === 'ready') this.connected.control = true;
+          if (data.type === 'ready' && !this.connected.control) {
+            this.connected.control = true;
+            this.status();
+          }
           this.lastAck = Date.now();
           if (data.ok === false) {
             // Do not retry a rejected command automatically (especially ownership conflicts).
@@ -104,7 +108,6 @@
             this.cb.reset();
             this.cb.error(data.detail || '控制指令被拒绝');
           }
-          this.status();
         } catch (err) { this.cb.error(err.message); }
       };
     }
@@ -117,6 +120,9 @@
       if (moving && !this.canControl()) {
         this.cb.reset();
         throw new Error('控制未就绪：请检查网关、底盘订阅者和急停状态');
+      }
+      if (moving && !(this.command.linear_x || this.command.linear_y || this.command.angular_z)) {
+        this.lastAck = Date.now();  // Give the first packet after idle its own acknowledgement window.
       }
       this.command = { linear_x: x, linear_y: y, angular_z: yaw };
       if (this.controlSocket && this.controlSocket.readyState === 1) {

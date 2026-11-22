@@ -18,7 +18,7 @@ def main():
     parser.add_argument('--yaml',required=True)
     parser.add_argument('--node-name',required=True)
     args=parser.parse_args()
-    rclpy.init(args=None)
+    rclpy.init(args=[])
     node=rclpy.create_node(args.node_name+'_loader')
     child=None
     try:

@@ -29,6 +29,15 @@
     }
     return pixels;
   }
+  const costColors = Array.from({length:256}, (_,v) => v===255?[124,58,237,70]:v===254?[220,38,38,215]:
+    v===253?[249,115,22,190]:v>0?[14,120,225,Math.round(25+v/252*95)]:[0,0,0,0]);
+  function costRaster(map, pixels = new Uint8ClampedArray(map.width*map.height*4)) {
+    for(let y=0;y<map.height;y++)for(let x=0;x<map.width;x++) {
+      const v=map.data[y*map.width+x],i=((map.height-1-y)*map.width+x)*4;
+      pixels.set(costColors[v],i);
+    }
+    return pixels;
+  }
   class LiveMapView {
     constructor(canvas, notify, clock = Date.now) {
       this.canvas=canvas; this.notify=notify; this.clock=clock; this.epoch=0;
@@ -37,6 +46,7 @@
     }
     clear() {
       this.map=null; this.geometry=null; this.pose=null; this.scan=null; this.plan=null;this.latest=null;
+      this.costmaps={};
       this.lastMessage=0; this.mapReceived=0; this.sampleReceived=0;
       this.connected=false; this.autoFit=true; this.needsFit=true; this.issue='等待地图连接';
     }
@@ -88,6 +98,24 @@
         else if (this.autoFit) this.needsFit=true;
       }
       this.connected=true; this.latest=message; this.sampleReceived=this.clock();
+      for(const name of ['global','local']) {
+        const entry=message.costmaps?.[name];
+        if(!entry) {delete this.costmaps[name];continue;}
+        const old=this.costmaps[name] || {};
+        if(entry.grid) {
+          const geometry=gridGeometry(entry.grid),cache=old.cache || document.createElement('canvas');
+          if(entry.grid.data.some(v=>!Number.isInteger(v)||v<0||v>255))throw new Error('代价地图数值无效');
+          if (cache.width !== entry.grid.width) cache.width=entry.grid.width;
+          if (cache.height !== entry.grid.height) cache.height=entry.grid.height;
+          const ctx=cache.getContext('2d');
+          if (!old.pixels || old.pixels.width!==cache.width || old.pixels.height!==cache.height)
+            old.pixels=ctx.createImageData(cache.width,cache.height);
+          costRaster(entry.grid, old.pixels.data);
+          ctx.putImageData(old.pixels,0,0);
+          old.grid=entry.grid;old.geometry=geometry;old.cache=cache;old.revision=entry.revision;
+        }
+        old.status=entry;this.costmaps[name]=old;
+      }
       this.pose=message.pose && message.tf?.robot && ['x','y','yaw','age_sec'].every(k=>Number.isFinite(message.pose[k])) ? message.pose : null;
       this.scan=message.scan && message.tf?.scan && message.scan.frame_id===this.map?.frame_id ? message.scan : null;
       this.plan=message.plan && message.plan.frame_id===this.map?.frame_id ? message.plan:null;
@@ -111,12 +139,20 @@
       return this.connected && this.scan && Number.isFinite(this.scan.age_sec) &&
         this.scan.age_sec+(this.clock()-this.sampleReceived)/1000<2 ? this.scan : null;
     }
+    validCostmap(name) {
+      const row=this.costmaps[name],entry=row?.status,t=entry?.transform;
+      return this.connected && row?.grid && row.revision===entry.revision && entry.available && entry.fresh && entry.aligned &&
+        Number.isFinite(entry.age_sec) && entry.age_sec+(this.clock()-this.sampleReceived)/1000<3 &&
+        t && [t.x,t.y,t.yaw].every(Number.isFinite)?row:null;
+    }
     status() {
       const pose=this.validPose(), scan=this.validScan();
       let text=this.issue;
       if (!text) text=this.map ? '实时地图 · '+this.map.width+' × '+this.map.height+' · '+(this.map.resolution*100).toFixed(1)+'cm/格' : '等待 /map；请启动 2D SLAM';
       else if (this.map && this.connected) text='地图已收到 · '+this.map.width+' × '+this.map.height+' · '+text;
       return { text, connected:this.connected, map:!!this.map, pose, scan,
+        costmapText:['global','local'].map(name=>(name==='global'?'全局':'局部')+'代价地图：'+
+          (this.validCostmap(name)?'正常':this.costmaps[name]?.status?.issue || '等待/过期')).join(' · '),
         frame:this.map?.frame_id || 'map', mapAge:this.latest?.map_age_sec,
         tfText:'机器人 TF：'+(pose?'正常':'等待/过期')+' · 激光 TF：'+(scan?'正常':'等待/过期') };
     }
@@ -148,6 +184,15 @@
         const scale=this.map.resolution*pan.zoom; ctx.scale(scale,scale); ctx.imageSmoothingEnabled=false;
         ctx.drawImage(this.cache,0,-this.map.height); ctx.restore();
       }
+      for(const name of ['global','local']) {
+        const enabled=name==='global'?layers.globalCostmap:layers.costmap,row=this.validCostmap(name);
+        if(!enabled || !row)continue;
+        const t=row.status.transform,o=row.grid.origin.position,c=Math.cos(t.yaw),s=Math.sin(t.yaw);
+        const p=project(t.x+c*o.x-s*o.y,t.y+s*o.x+c*o.y);
+        ctx.save();ctx.translate(...p);ctx.rotate(-t.yaw-row.geometry.angle);
+        const scale=row.grid.resolution*pan.zoom;ctx.scale(scale,scale);ctx.imageSmoothingEnabled=false;
+        ctx.drawImage(row.cache,0,-row.grid.height);ctx.restore();
+      }
       if (layers.plan && this.connected && this.plan && this.plan.age_sec+(this.clock()-this.sampleReceived)/1000<3) {
         ctx.strokeStyle='#10b981';ctx.lineWidth=3;ctx.beginPath();
         (this.plan.points || []).forEach((point,i)=>{const p=project(...point);if(i)ctx.lineTo(...p);else ctx.moveTo(...p);});ctx.stroke();
@@ -163,6 +208,11 @@
         ctx.save();ctx.translate(...p);ctx.rotate(-a);ctx.strokeStyle='#f59e0b';ctx.lineWidth=3;
         ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(30,0);ctx.lineTo(20,-7);ctx.moveTo(30,0);ctx.lineTo(20,7);ctx.stroke();
         ctx.beginPath();ctx.arc(0,0,7,0,Math.PI*2);ctx.stroke();ctx.restore();
+      }
+      if(overlays.rejected) {
+        const p=project(overlays.rejected.x,overlays.rejected.y);ctx.strokeStyle='#dc2626';ctx.lineWidth=3;
+        ctx.beginPath();ctx.arc(...p,11,0,Math.PI*2);ctx.moveTo(p[0]-7,p[1]-7);ctx.lineTo(p[0]+7,p[1]+7);
+        ctx.moveTo(p[0]-7,p[1]+7);ctx.lineTo(p[0]+7,p[1]-7);ctx.stroke();
       }
       const scan=this.validScan();
       if (scan && layers.scan) {
@@ -197,6 +247,6 @@
       ctx.font='11px sans-serif';ctx.textAlign='left';ctx.fillText(meters.toPrecision(2)+' m',16,height-28);
     }
   }
-  global.CockpitMapMath={yaw,gridGeometry,raster};
+  global.CockpitMapMath={yaw,gridGeometry,raster,costRaster};
   global.LiveMapView=LiveMapView;
 })(typeof window==='undefined'?globalThis:window);

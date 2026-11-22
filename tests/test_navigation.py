@@ -1,11 +1,12 @@
 import sys,math,time,threading
+import copy
 from pathlib import Path
 from types import SimpleNamespace as S
 from unittest import TestCase,main
 from unittest.mock import MagicMock
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'backend'))
 from control_safety import VelocityLease,MotionArbiter,ControlError
-from navigation_bridge import NavigationBridge
+from navigation_bridge import NavigationBridge, localization_issue
 from fastapi import HTTPException
 
 
@@ -52,6 +53,36 @@ def pose():return S(header=S(frame_id='',stamp=S(sec=0,nanosec=0)),pose=S(positi
 
 
 class BridgeTests(TestCase):
+    def test_stationary_amcl_is_valid_but_motion_requires_fresh_observations(self):
+        amcl = {'covariance': [0.] * 36, 'x': 1., 'y': 2., 'yaw_deg': 179., 'received': 5.}
+        pose = {'x': 1., 'y': 2., 'yaw': math.radians(-179)}
+        self.assertIsNone(localization_issue(amcl, pose, 200.))
+        self.assertIn('已移动', localization_issue(amcl, dict(pose, x=1.25), 200.))
+        amcl['covariance'][7] = -.01
+        self.assertIn('协方差', localization_issue(amcl, pose, 6.))
+
+    def test_manual_seed_needs_consistent_new_amcl_samples(self):
+        b = self.bridge()
+        b.initial_stamp = 10.
+        b.initial_source = 'manual'
+        b.manual_seed = {'x': 1., 'y': 1., 'yaw_deg': 0.}
+        b.manual_good_samples = 0
+        b.manual_settled = False
+        msg = S(header=S(stamp=S(sec=11,nanosec=0),frame_id='map'), pose=S(
+            pose=S(position=S(x=1.6,y=1.),orientation=S(x=0.,y=0.,z=0.,w=1.)),covariance=[0.] * 36))
+        for t in range(11,16):
+            msg.header.stamp.sec = t
+            b._on_pose(msg)
+        self.assertFalse(b.manual_settled)
+        msg.pose.pose.position.x = 1.
+        for t in (16,17,17,16,18):
+            msg.header.stamp.sec = t
+            b._on_pose(msg)
+        self.assertFalse(b.manual_settled)
+        msg.header.stamp.sec = 19
+        b._on_pose(msg)
+        self.assertTrue(b.manual_settled)
+
     def bridge(self,ready=True):
         b=NavigationBridge.__new__(NavigationBridge)
         b.lock=threading.RLock();b.confirmed=ready;b.initial_stamp=0;b.amcl=None
@@ -62,8 +93,12 @@ class BridgeTests(TestCase):
         b.metrics={'distance_remaining':0.,'navigation_time':0.,'estimated_time_remaining':0.,'number_of_recoveries':0}
         b.node=S(get_clock=lambda:S(now=lambda:S(to_msg=lambda:S(sec=123,nanosec=0))))
         b.PoseStamped=pose;b.actions={'single':S(Goal=lambda:S()),'through_poses':S(Goal=lambda:S())}
-        grid={'width':4,'height':4,'resolution':1.,'data':[0]*16,'origin':{'position':{'x':0,'y':0},'orientation':{'x':0,'y':0,'z':0,'w':1}}}
-        b.mapping_getter=lambda:S(grid=grid)
+        grid={'frame_id':'map','width':4,'height':4,'resolution':1.,'data':[0]*16,'origin':{'position':{'x':0,'y':0},'orientation':{'x':0,'y':0,'z':0,'w':1}}}
+        cost_grid=copy.deepcopy(grid)
+        costs=S(raw=lambda _:({'grid':cost_grid,'revision':1,'age_sec':0},None),
+                footprint=lambda:({'footprint':'[[0.25,0.22],[0.25,-0.22],[-0.25,-0.22],[-0.25,0.22]]','padding':.02},None))
+        feed=S(lock=threading.RLock(),grid=grid,revision=1,costmaps=costs,snapshot=lambda **kw:{'map_valid':True,'pose':{'x':1.,'y':1.,'yaw':0},'tf':{'robot':True}})
+        b.mapping_getter=lambda:feed
         manual=VelocityLease(lambda *v:None,lambda:True)
         b.motion=MotionArbiter(manual,lambda *v:None,lambda:True)
         b.motion.nav_ready=lambda:True
@@ -104,6 +139,16 @@ class BridgeTests(TestCase):
         b=self.bridge();b.clients['single'].send_goal_async.side_effect=lambda *a,**k:Future(S(accepted=False))
         b.start('single',[{'x':1,'y':1}]);b.thread.join(1)
         self.assertEqual(b.phase,'ABORTED');self.assertIsNone(b.motion.owner)
+    def test_inscribed_goal_is_rejected_before_action_submission(self):
+        b=self.bridge();row,_=b.mapping_getter().costmaps.raw('global');row['grid']['data'][10]=253
+        with self.assertRaises(HTTPException) as ctx:b.start('single',[{'x':2.5,'y':2.5}])
+        self.assertIn('253',ctx.exception.detail);b.clients['single'].send_goal_async.assert_not_called()
+        self.assertIsNone(b.motion.owner)
+    def test_dynamic_obstacle_is_rechecked_before_each_action(self):
+        b=self.bridge();b.precheck=MagicMock(side_effect=[{'valid':True},{'valid':False,'issues':['目标进入禁入区 253']}])
+        b.start('single',[{'x':2.5,'y':2.5}]);b.thread.join(1)
+        self.assertEqual(b.phase,'ABORTED');self.assertIn('253',b.error)
+        b.clients['single'].send_goal_async.assert_not_called();self.assertIsNone(b.motion.owner)
     def test_point_validation(self):
         b=self.bridge()
         for p in [{'x':float('nan'),'y':1},{'x':10,'y':10}]:

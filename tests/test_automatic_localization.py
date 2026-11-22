@@ -50,8 +50,10 @@ class MatcherTests(TestCase):
 
 class AutomaticTests(TestCase):
     def test_rotation_obstacle_guard_excludes_body_returns(self):
-        self.assertTrue(AutomaticLocalization._rotation_clear([[.1,.1],[1.,0]]))
-        self.assertFalse(AutomaticLocalization._rotation_clear([[.35,0]]))
+        body = [[.25,.22],[.25,-.22],[-.25,-.22],[-.25,.22]]
+        self.assertTrue(AutomaticLocalization._rotation_clear([[.1,.1],[1.,0]], body, .43))
+        self.assertFalse(AutomaticLocalization._rotation_clear([[.35,0]], body, .43))
+        self.assertFalse(AutomaticLocalization._rotation_clear([[.47,0]], body, .52))
 
     def test_localization_cannot_accept_navigation_or_translation_commands(self):
         outputs=[];now=[1.];manual=VelocityLease(lambda *v:outputs.append(v),lambda:True,clock=lambda:now[0])
